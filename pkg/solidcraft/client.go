@@ -47,7 +47,7 @@ type toolCallContent struct {
 
 // Start launches solidcraft-cli mcp and completes protocol handshake.
 func Start() (*Client, error) {
-	cmd := exec.Command("solidcraft-cli", "mcp")
+	cmd := exec.Command("solidcraft-cli", "mcp", "--allow-any-path")
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		return nil, fmt.Errorf("failed to create stdin pipe: %w", err)

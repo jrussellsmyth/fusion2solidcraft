@@ -62,6 +62,16 @@ def run(_context: str):
 
         if hasattr(entity, 'objectType'):
             obj_type = entity.objectType.split('::')[-1]
+            if obj_type == 'CombineFeature':
+                try:
+                    item.rollTo(True)
+                except Exception:
+                    pass
+            else:
+                try:
+                    item.rollTo(False)
+                except Exception:
+                    pass
             
             if obj_type == 'Sketch':
                 step_data["type"] = "sketch"
@@ -71,18 +81,22 @@ def run(_context: str):
                 try:
                     ref_plane = sketch.referencePlane
                     if hasattr(ref_plane, 'name'):
-                        plane_name = ref_plane.name.replace(' Origin Plane', '').replace(' Plane', '')
+                        candidate = ref_plane.name.replace(' Origin Plane', '').replace(' Plane', '')
+                        if candidate in ['XY', 'XZ', 'YZ']:
+                            plane_name = candidate
                 except Exception:
+                    pass
+                if plane_name not in ['XY', 'XZ', 'YZ']:
                     try:
-                        n = sketch.primaryNormalVector
-                        if abs(n.z - 1.0) < 0.01 or abs(n.z + 1.0) < 0.01:
+                        z = sketch.xDirection.crossProduct(sketch.yDirection)
+                        if abs(z.z - 1.0) < 0.01 or abs(z.z + 1.0) < 0.01:
                             plane_name = "XY"
-                        elif abs(n.y - 1.0) < 0.01 or abs(n.y + 1.0) < 0.01:
+                        elif abs(z.y - 1.0) < 0.01 or abs(z.y + 1.0) < 0.01:
                             plane_name = "XZ"
-                        elif abs(n.x - 1.0) < 0.01 or abs(n.x + 1.0) < 0.01:
+                        elif abs(z.x - 1.0) < 0.01 or abs(z.x + 1.0) < 0.01:
                             plane_name = "YZ"
                     except Exception:
-                        pass
+                        plane_name = "XY"
                 
                 curves = []
                 for l_idx, line in enumerate(sketch.sketchCurves.sketchLines):
@@ -274,11 +288,12 @@ def run(_context: str):
                     if hasattr(comb.toolBodies, 'count'):
                         for ti in range(comb.toolBodies.count):
                             tool_names.append(comb.toolBodies.item(ti).name)
-                    else:
+                    elif hasattr(comb.toolBodies, '__iter__'):
                         tool_names = [t.name for t in comb.toolBodies]
                 except Exception:
                     pass
                 try:
+                    item.rollTo(False)
                     for b in comb.bodies:
                         res_bodies.append(b.name)
                 except Exception:
@@ -420,12 +435,17 @@ def run(_context: str):
 
         model_data["timeline"].append(step_data)
 
+    try:
+        design.timeline.moveToEnd()
+    except Exception:
+        pass
+
     with open('%s', 'w') as f:
         json.dump(model_data, f)
     print("EXTRACT_OK")
 `, tempFile, tempFile)
 
-	out, err := e.client.ExecuteScript(script, true)
+	out, err := e.client.ExecuteScript(script, false)
 	if err != nil {
 		return nil, fmt.Errorf("extractor script failed: %w", err)
 	}

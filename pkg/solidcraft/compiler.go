@@ -120,7 +120,7 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 
 	// 1. sketch.create
 	plane := s.Plane
-	if plane == "" {
+	if plane != "XY" && plane != "XZ" && plane != "YZ" {
 		plane = "XY"
 	}
 	cmds = append(cmds, Command{
@@ -223,6 +223,7 @@ func (c *Compiler) checkAndRenameBodies(execResp string, desiredName string) {
 	}
 	var res struct {
 		CreatedBodies []string `json:"created_bodies"`
+		ChangedBodies []string `json:"changed_bodies"`
 	}
 	if err := json.Unmarshal([]byte(execResp), &res); err != nil {
 		return
@@ -230,6 +231,14 @@ func (c *Compiler) checkAndRenameBodies(execResp string, desiredName string) {
 	for _, b := range res.CreatedBodies {
 		if b != desiredName {
 			_ = c.renameBody(b, desiredName)
+		}
+	}
+	if len(res.CreatedBodies) == 0 && len(res.ChangedBodies) > 0 {
+		for _, b := range res.ChangedBodies {
+			if b != desiredName {
+				_ = c.renameBody(b, desiredName)
+				break
+			}
 		}
 	}
 }
@@ -259,6 +268,9 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 				CentroidSketch []float64 `json:"centroid_sketch"`
 			} `json:"profiles"`
 		} `json:"sketches"`
+		Bodies []struct {
+			Name string `json:"name"`
+		} `json:"bodies"`
 	}
 
 	if err := json.Unmarshal([]byte(inspOut), &designData); err != nil {
@@ -320,6 +332,22 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		targetIndices = append(targetIndices, m.Index)
 	}
 
+	var targetBodies []string
+	if e.Operation == "join" || e.Operation == "cut" {
+		for _, rb := range e.ResultBodies {
+			actual := rb
+			if mapped, ok := c.bodyMap[rb]; ok {
+				actual = mapped
+			}
+			for _, db := range designData.Bodies {
+				if db.Name == actual {
+					targetBodies = append(targetBodies, actual)
+					break
+				}
+			}
+		}
+	}
+
 	// If no profile indices matched, check if we have a FaceTarget (face extrusion)
 	if len(targetIndices) == 0 && e.FaceTarget != nil {
 		faceParams := SolidExtrudeParams{
@@ -327,6 +355,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 			Distance:  e.DistanceMM,
 			Operation: string(e.Operation),
 			Face:      []float64{e.FaceTarget.X, e.FaceTarget.Y, e.FaceTarget.Z},
+			Targets:   targetBodies,
 		}
 		if e.Operation == "new" && desiredBodyName != "" {
 			faceParams.BodyName = desiredBodyName
@@ -358,6 +387,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		Distance:  e.DistanceMM,
 		Operation: string(e.Operation),
 		Profiles:  profArg,
+		Targets:   targetBodies,
 	}
 	if e.Operation == "new" && desiredBodyName != "" {
 		extParams.BodyName = desiredBodyName
@@ -382,6 +412,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 				Distance:  e.DistanceMM,
 				Operation: string(e.Operation),
 				Profiles:  []int{idx},
+				Targets:   targetBodies,
 			}
 			if e.Operation == "new" && desiredBodyName != "" {
 				subParams.BodyName = desiredBodyName
@@ -498,13 +529,34 @@ func (c *Compiler) compileAndExecuteCombine(cb cadir.CombineFeature) error {
 	}
 
 	target := cb.TargetBody
-	if target == "" {
+	if mapped, ok := c.bodyMap[target]; ok {
+		target = mapped
+	}
+	targetFound := false
+	for _, db := range designData.Bodies {
+		if db.Name == target {
+			targetFound = true
+			break
+		}
+	}
+	if !targetFound {
 		target = designData.Bodies[0].Name
 	}
 
 	var tools []string
 	if len(cb.ToolBodies) > 0 {
-		tools = cb.ToolBodies
+		for _, tb := range cb.ToolBodies {
+			actual := tb
+			if mapped, ok := c.bodyMap[tb]; ok {
+				actual = mapped
+			}
+			for _, db := range designData.Bodies {
+				if db.Name == actual && actual != target {
+					tools = append(tools, actual)
+					break
+				}
+			}
+		}
 	} else {
 		for _, b := range designData.Bodies {
 			if b.Name != target {
@@ -522,13 +574,19 @@ func (c *Compiler) compileAndExecuteCombine(cb cadir.CombineFeature) error {
 		op = "join"
 	}
 
-	_, err = c.client.Execute("solid.combine", SolidCombineParams{
+	desiredResultName := ""
+	if len(cb.ResultBodies) > 0 {
+		desiredResultName = cb.ResultBodies[0]
+	}
+
+	resp, err := c.client.Execute("solid.combine", SolidCombineParams{
 		Target:    target,
 		Tools:     tools,
 		Operation: op,
 		KeepTools: cb.KeepTools,
 	})
 	if err == nil {
+		c.checkAndRenameBodies(resp, desiredResultName)
 		return nil
 	}
 
@@ -537,7 +595,7 @@ func (c *Compiler) compileAndExecuteCombine(cb cadir.CombineFeature) error {
 		var lastErr error
 		succeededCount := 0
 		for _, tool := range tools {
-			_, pErr := c.client.Execute("solid.combine", SolidCombineParams{
+			subResp, pErr := c.client.Execute("solid.combine", SolidCombineParams{
 				Target:    target,
 				Tools:     []string{tool},
 				Operation: op,
@@ -547,6 +605,7 @@ func (c *Compiler) compileAndExecuteCombine(cb cadir.CombineFeature) error {
 				lastErr = pErr
 			} else {
 				succeededCount++
+				c.checkAndRenameBodies(subResp, desiredResultName)
 			}
 		}
 		if succeededCount > 0 {

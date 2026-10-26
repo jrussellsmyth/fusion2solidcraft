@@ -47,6 +47,7 @@ type SolidExtrudeParams struct {
 	Distance  float64     `json:"distance"`
 	Operation string      `json:"operation,omitempty"` // "new", "join", "cut", "intersect"
 	Profiles  interface{} `json:"profiles,omitempty"`  // [0, 1] or "all"
+	Targets   []string    `json:"targets,omitempty"`   // explicit target bodies
 }
 
 // BodyRenameParams parameters for body.rename.
