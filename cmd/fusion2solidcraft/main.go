@@ -6,12 +6,14 @@ import (
 	"fmt"
 	"os"
 
+	"github.com/jrussell/fusion2solidcraft/pkg/cadir"
 	"github.com/jrussell/fusion2solidcraft/pkg/fusion"
 	"github.com/jrussell/fusion2solidcraft/pkg/solidcraft"
 )
 
 func main() {
 	fusionURL := flag.String("fusion-url", "http://127.0.0.1:27182/mcp", "Fusion 360 MCP URL")
+	inputPath := flag.String("input", "", "Load CAD-IR model from existing JSON file instead of extracting from Fusion")
 	inspectOnly := flag.Bool("inspect", false, "Inspect & lint model timeline without streaming to SolidCraft")
 	verify := flag.Bool("verify", true, "Verify intermediate B-Rep stats (volume, area, bbox)")
 	savePath := flag.String("save", "", "Path to save .solidcraft file")
@@ -22,17 +24,35 @@ func main() {
 	fmt.Println("  Fusion 360 -> SolidCraft Parametric Translator  ")
 	fmt.Println("==================================================")
 
-	// 1. Connect to Fusion 360
-	fmt.Printf("Connecting to Fusion 360 at %s...\n", *fusionURL)
-	fusionClient := fusion.NewClient(*fusionURL)
-	extractor := fusion.NewExtractor(fusionClient)
+	var model *cadir.Model
 
-	// 2. Extract CAD-IR Model
-	fmt.Println("Extracting active model timeline from Fusion 360...")
-	model, err := extractor.ExtractModel()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "Error extracting Fusion model: %v\n", err)
-		os.Exit(1)
+	if *inputPath != "" {
+		fmt.Printf("Loading CAD-IR model from %s...\n", *inputPath)
+		data, err := os.ReadFile(*inputPath)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error reading input JSON: %v\n", err)
+			os.Exit(1)
+		}
+		var loadedModel cadir.Model
+		if err := json.Unmarshal(data, &loadedModel); err != nil {
+			fmt.Fprintf(os.Stderr, "Error parsing input JSON: %v\n", err)
+			os.Exit(1)
+		}
+		model = &loadedModel
+	} else {
+		// 1. Connect to Fusion 360
+		fmt.Printf("Connecting to Fusion 360 at %s...\n", *fusionURL)
+		fusionClient := fusion.NewClient(*fusionURL)
+		extractor := fusion.NewExtractor(fusionClient)
+
+		// 2. Extract CAD-IR Model
+		fmt.Println("Extracting active model timeline from Fusion 360...")
+		extracted, err := extractor.ExtractModel()
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Error extracting Fusion model: %v\n", err)
+			os.Exit(1)
+		}
+		model = extracted
 	}
 
 	// 3. Analyze Feature Coverage

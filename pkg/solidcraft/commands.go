@@ -56,6 +56,29 @@ type SolidChamferParams struct {
 	Edges    [][]float64 `json:"edges"` // [[x, y, z] pointOnEdge]
 }
 
+// SolidCombineParams parameters for solid.combine.
+type SolidCombineParams struct {
+	Target    string   `json:"target"`
+	Tools     []string `json:"tools"`
+	Operation string   `json:"operation,omitempty"` // "join", "cut", "intersect"
+	KeepTools bool     `json:"keep_tools,omitempty"`
+}
+
+// SolidMoveParams parameters for solid.move.
+type SolidMoveParams struct {
+	Bodies    []string  `json:"bodies"`
+	Translate []float64 `json:"translate,omitempty"` // [x, y, z]
+	Axis      []float64 `json:"axis,omitempty"`
+	Angle     float64   `json:"angle,omitempty"`
+	Copy      bool      `json:"copy,omitempty"`
+}
+
+// SolidMirrorParams parameters for solid.mirror.
+type SolidMirrorParams struct {
+	Bodies []string    `json:"bodies,omitempty"`
+	Plane  interface{} `json:"plane"` // "XY", "XZ", "YZ", or {"origin": [x,y,z], "normal": [x,y,z]}
+}
+
 // AppearanceAssignParams parameters for appearance.assign.
 type AppearanceAssignParams struct {
 	Bodies []string    `json:"bodies,omitempty"`
