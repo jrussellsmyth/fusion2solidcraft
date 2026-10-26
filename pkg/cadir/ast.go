@@ -71,6 +71,9 @@ type ExtrudeFeature struct {
 	Operation        BooleanOp `json:"operation"`
 	ProfileCentroids []Point2D `json:"profile_centroids"`
 	TaperAngleDeg    float64   `json:"taper_angle_deg,omitempty"`
+	SketchName       string    `json:"sketch_name,omitempty"`
+	ResultBodies     []string  `json:"result_bodies,omitempty"`
+	FaceTarget       *Point3D  `json:"face_target,omitempty"`
 }
 
 // FilletFeature represents edge rounding.
@@ -91,12 +94,13 @@ type ChamferFeature struct {
 
 // CombineFeature represents boolean operations between solid bodies.
 type CombineFeature struct {
-	ID         string    `json:"id"`
-	Name       string    `json:"name"`
-	TargetBody string    `json:"target_body"`
-	ToolBodies []string  `json:"tool_bodies"`
-	Operation  BooleanOp `json:"operation"` // "join", "cut", "intersect"
-	KeepTools  bool      `json:"keep_tools"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	TargetBody   string    `json:"target_body"`
+	ToolBodies   []string  `json:"tool_bodies"`
+	Operation    BooleanOp `json:"operation"` // "join", "cut", "intersect"
+	KeepTools    bool      `json:"keep_tools"`
+	ResultBodies []string  `json:"result_bodies,omitempty"`
 }
 
 // MoveFeature represents 3D translations and rotations of bodies.
@@ -108,6 +112,7 @@ type MoveFeature struct {
 	RotationAxis Point3D  `json:"rotation_axis,omitempty"`
 	AngleDeg     float64  `json:"angle_deg,omitempty"`
 	Copy         bool     `json:"copy"`
+	ResultBodies []string `json:"result_bodies,omitempty"`
 }
 
 // MirrorFeature represents feature or body mirroring.

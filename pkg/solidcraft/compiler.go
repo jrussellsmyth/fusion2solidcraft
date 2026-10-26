@@ -10,12 +10,30 @@ import (
 
 // Compiler translates CAD-IR models into SolidCraft executable commands.
 type Compiler struct {
-	client *Client
+	client  *Client
+	bodyMap map[string]string
 }
 
 // NewCompiler creates a new Compiler.
 func NewCompiler(client *Client) *Compiler {
-	return &Compiler{client: client}
+	return &Compiler{
+		client:  client,
+		bodyMap: make(map[string]string),
+	}
+}
+
+func (c *Compiler) renameBody(oldName, newName string) error {
+	if oldName == "" || newName == "" || oldName == newName {
+		return nil
+	}
+	_, err := c.client.Execute("body.rename", BodyRenameParams{
+		Body: oldName,
+		Name: newName,
+	})
+	if err == nil {
+		c.bodyMap[oldName] = newName
+	}
+	return err
 }
 
 // CompileModel transforms the full timeline into SolidCraft commands and replays it step-by-step.
@@ -106,8 +124,11 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 		plane = "XY"
 	}
 	cmds = append(cmds, Command{
-		ID:     "sketch.create",
-		Params: SketchCreateParams{Plane: plane},
+		ID: "sketch.create",
+		Params: SketchCreateParams{
+			Name:  s.Name,
+			Plane: plane,
+		},
 	})
 
 	// Detect any circle radius for curve pre-conditioning
@@ -196,7 +217,29 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 	return err
 }
 
+func (c *Compiler) checkAndRenameBodies(execResp string, desiredName string) {
+	if desiredName == "" || execResp == "" {
+		return
+	}
+	var res struct {
+		CreatedBodies []string `json:"created_bodies"`
+	}
+	if err := json.Unmarshal([]byte(execResp), &res); err != nil {
+		return
+	}
+	for _, b := range res.CreatedBodies {
+		if b != desiredName {
+			_ = c.renameBody(b, desiredName)
+		}
+	}
+}
+
 func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
+	var desiredBodyName string
+	if len(e.ResultBodies) > 0 {
+		desiredBodyName = e.ResultBodies[0]
+	}
+
 	// Query current design to find evaluated sketch profiles
 	inspOut, err := c.client.CallTool("inspect_design", map[string]interface{}{})
 	if err != nil {
@@ -272,6 +315,24 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		targetIndices = append(targetIndices, m.Index)
 	}
 
+	// If no profile indices matched, check if we have a FaceTarget (face extrusion)
+	if len(targetIndices) == 0 && e.FaceTarget != nil {
+		faceParams := SolidExtrudeParams{
+			Name:      e.Name,
+			Distance:  e.DistanceMM,
+			Operation: string(e.Operation),
+			Face:      []float64{e.FaceTarget.X, e.FaceTarget.Y, e.FaceTarget.Z},
+		}
+		if e.Operation == "new" && desiredBodyName != "" {
+			faceParams.BodyName = desiredBodyName
+		}
+		resp, fErr := c.client.Execute("solid.extrude", faceParams)
+		if fErr == nil {
+			c.checkAndRenameBodies(resp, desiredBodyName)
+			return nil
+		}
+	}
+
 	if len(targetIndices) == 0 {
 		if len(designData.Sketches) > 0 {
 			lastSketchProfs := len(designData.Sketches[len(designData.Sketches)-1].Profiles)
@@ -287,12 +348,22 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		profArg = targetIndices
 	}
 
-	_, err = c.client.Execute("solid.extrude", SolidExtrudeParams{
+	extParams := SolidExtrudeParams{
+		Name:      e.Name,
 		Distance:  e.DistanceMM,
 		Operation: string(e.Operation),
 		Profiles:  profArg,
-	})
+	}
+	if e.Operation == "new" && desiredBodyName != "" {
+		extParams.BodyName = desiredBodyName
+	}
+	if e.SketchName != "" {
+		extParams.Sketch = e.SketchName
+	}
+
+	resp, err := c.client.Execute("solid.extrude", extParams)
 	if err == nil {
+		c.checkAndRenameBodies(resp, desiredBodyName)
 		return nil
 	}
 
@@ -301,15 +372,21 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		var lastErr error
 		succeededCount := 0
 		for _, idx := range targetIndices {
-			_, pErr := c.client.Execute("solid.extrude", SolidExtrudeParams{
+			subParams := SolidExtrudeParams{
+				Name:      e.Name,
 				Distance:  e.DistanceMM,
 				Operation: string(e.Operation),
 				Profiles:  []int{idx},
-			})
+			}
+			if e.Operation == "new" && desiredBodyName != "" {
+				subParams.BodyName = desiredBodyName
+			}
+			subResp, pErr := c.client.Execute("solid.extrude", subParams)
 			if pErr != nil {
 				lastErr = pErr
 			} else {
 				succeededCount++
+				c.checkAndRenameBodies(subResp, desiredBodyName)
 			}
 		}
 		if succeededCount > 0 {
@@ -344,9 +421,13 @@ func (c *Compiler) compileAndExecuteMove(m cadir.MoveFeature) error {
 
 	var targetBodies []string
 	for _, bName := range m.Bodies {
+		actualName := bName
+		if mapped, ok := c.bodyMap[bName]; ok {
+			actualName = mapped
+		}
 		for _, db := range designData.Bodies {
-			if db.Name == bName {
-				targetBodies = append(targetBodies, bName)
+			if db.Name == actualName {
+				targetBodies = append(targetBodies, actualName)
 				break
 			}
 		}
@@ -376,7 +457,19 @@ func (c *Compiler) compileAndExecuteMove(m cadir.MoveFeature) error {
 		params.Angle = m.AngleDeg
 	}
 
-	_, err = c.client.Execute("solid.move", params)
+	resp, err := c.client.Execute("solid.move", params)
+	if err == nil && m.Copy && len(m.ResultBodies) > 0 {
+		var res struct {
+			CreatedBodies []string `json:"created_bodies"`
+		}
+		if json.Unmarshal([]byte(resp), &res) == nil {
+			for i, created := range res.CreatedBodies {
+				if i < len(m.ResultBodies) {
+					_ = c.renameBody(created, m.ResultBodies[i])
+				}
+			}
+		}
+	}
 	return err
 }
 
@@ -430,6 +523,35 @@ func (c *Compiler) compileAndExecuteCombine(cb cadir.CombineFeature) error {
 		Operation: op,
 		KeepTools: cb.KeepTools,
 	})
+	if err == nil {
+		return nil
+	}
+
+	// Resilient fallback: combine tool bodies sequentially pair-by-pair
+	if len(tools) > 1 {
+		var lastErr error
+		succeededCount := 0
+		for _, tool := range tools {
+			_, pErr := c.client.Execute("solid.combine", SolidCombineParams{
+				Target:    target,
+				Tools:     []string{tool},
+				Operation: op,
+				KeepTools: cb.KeepTools,
+			})
+			if pErr != nil {
+				lastErr = pErr
+			} else {
+				succeededCount++
+			}
+		}
+		if succeededCount > 0 {
+			return nil
+		}
+		if lastErr != nil {
+			return lastErr
+		}
+	}
+
 	return err
 }
 

@@ -154,9 +154,24 @@ def run(_context: str):
                 if ext.extentOne and hasattr(ext.extentOne, 'distance'):
                     dist_val = ext.extentOne.distance.value * 10
                     
+                result_bodies = []
+                try:
+                    for b in ext.bodies:
+                        result_bodies.append(b.name)
+                except Exception:
+                    pass
+
+                sketch_name = ""
                 centroids = []
                 try:
                     prof = ext.profile
+                    if hasattr(prof, 'parentSketch') and prof.parentSketch:
+                        sketch_name = prof.parentSketch.name
+                    elif hasattr(prof, 'count') and prof.count > 0:
+                        p0 = prof.item(0)
+                        if hasattr(p0, 'parentSketch') and p0.parentSketch:
+                            sketch_name = p0.parentSketch.name
+
                     if hasattr(prof, '__iter__'):
                         for p in prof:
                             if hasattr(p, 'areaProperties'):
@@ -165,11 +180,31 @@ def run(_context: str):
                     elif hasattr(prof, 'areaProperties'):
                         c = prof.areaProperties().centroid
                         centroids.append({"x": c.x * 10, "y": c.y * 10})
+                    elif hasattr(prof, 'count'):
+                        for i in range(prof.count):
+                            p = prof.item(i)
+                            if hasattr(p, 'areaProperties'):
+                                c = p.areaProperties().centroid
+                                centroids.append({"x": c.x * 10, "y": c.y * 10})
                 except Exception:
+                    pass
+
+                face_target = None
+                if not centroids:
                     try:
                         for f in ext.startFaces:
                             c = f.centroid
-                            centroids.append({"x": c.x * 10, "y": c.y * 10})
+                            face_target = {"x": c.x * 10, "y": c.y * 10, "z": c.z * 10}
+                            break
+                    except Exception:
+                        pass
+                if not centroids and not face_target:
+                    try:
+                        for f in ext.faces:
+                            if hasattr(f.geometry, 'normal') and abs(f.geometry.normal.z) > 0.9:
+                                c = f.centroid
+                                face_target = {"x": c.x * 10, "y": c.y * 10, "z": c.z * 10}
+                                break
                     except Exception:
                         pass
 
@@ -178,7 +213,10 @@ def run(_context: str):
                     "name": item.name,
                     "distance_mm": dist_val,
                     "operation": op_str,
-                    "profile_centroids": centroids
+                    "profile_centroids": centroids,
+                    "sketch_name": sketch_name,
+                    "result_bodies": result_bodies,
+                    "face_target": face_target
                 }
 
             elif obj_type == 'FilletFeature':
@@ -210,10 +248,20 @@ def run(_context: str):
                 
                 target_name = ""
                 tool_names = []
+                res_bodies = []
                 try:
                     if comb.targetBody:
                         target_name = comb.targetBody.name
-                    tool_names = [t.name for t in comb.toolBodies]
+                    if hasattr(comb.toolBodies, 'count'):
+                        for ti in range(comb.toolBodies.count):
+                            tool_names.append(comb.toolBodies.item(ti).name)
+                    else:
+                        tool_names = [t.name for t in comb.toolBodies]
+                except Exception:
+                    pass
+                try:
+                    for b in comb.bodies:
+                        res_bodies.append(b.name)
                 except Exception:
                     pass
 
@@ -223,7 +271,8 @@ def run(_context: str):
                     "target_body": target_name,
                     "tool_bodies": tool_names,
                     "operation": op_map.get(comb.operation, "join"),
-                    "keep_tools": comb.isKeepToolBodies
+                    "keep_tools": comb.isKeepToolBodies,
+                    "result_bodies": res_bodies
                 }
 
             elif obj_type == 'MoveFeature':
@@ -241,17 +290,33 @@ def run(_context: str):
                     "name": item.name,
                     "bodies": body_names,
                     "translation": {"x": t.x * 10, "y": t.y * 10, "z": t.z * 10},
-                    "copy": False
+                    "copy": False,
+                    "result_bodies": body_names
                 }
 
             elif obj_type == 'CopyPasteBody':
                 step_data["type"] = "move"
                 cp = adsk.fusion.CopyPasteBody.cast(entity)
                 src_bodies = []
+                res_bodies = []
                 try:
                     src_bodies = [b.name for b in cp.sourceBody]
                 except Exception:
                     pass
+                try:
+                    for b in cp.bodies:
+                        res_bodies.append(b.name)
+                except Exception:
+                    pass
+
+                step_data["move"] = {
+                    "id": f"copy_{idx+1}",
+                    "name": item.name,
+                    "bodies": src_bodies,
+                    "translation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "copy": True,
+                    "result_bodies": res_bodies
+                }
 
                 step_data["move"] = {
                     "id": f"copy_{idx+1}",
