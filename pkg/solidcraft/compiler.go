@@ -235,6 +235,11 @@ func (c *Compiler) checkAndRenameBodies(execResp string, desiredName string) {
 }
 
 func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
+	if math.Abs(e.DistanceMM) < 0.001 {
+		fmt.Printf("Notice: extrude %s has zero distance, skipping\n", e.Name)
+		return nil
+	}
+
 	var desiredBodyName string
 	if len(e.ResultBodies) > 0 {
 		desiredBodyName = e.ResultBodies[0]

@@ -151,8 +151,17 @@ def run(_context: str):
                 op_str = op_map.get(ext.operation, "new")
                 
                 dist_val = 0.0
-                if ext.extentOne and hasattr(ext.extentOne, 'distance'):
+                if ext.extentOne and hasattr(ext.extentOne, 'distance') and ext.extentOne.distance:
                     dist_val = ext.extentOne.distance.value * 10
+                if abs(dist_val) < 0.001 and ext.faces and ext.faces.count > 0:
+                    try:
+                        zs = [ext.faces.item(fi).centroid.z * 10 for fi in range(ext.faces.count)]
+                        if zs:
+                            h = max(zs) - min(zs)
+                            if h > 0.01:
+                                dist_val = h
+                    except Exception:
+                        pass
                     
                 result_bodies = []
                 try:
