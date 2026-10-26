@@ -151,8 +151,18 @@ def run(_context: str):
                 op_str = op_map.get(ext.operation, "new")
                 
                 dist_val = 0.0
-                if ext.extentOne and hasattr(ext.extentOne, 'distance') and ext.extentOne.distance:
-                    dist_val = ext.extentOne.distance.value * 10
+                if ext.extentOne:
+                    if hasattr(ext.extentOne, 'distance') and ext.extentOne.distance:
+                        dist_val = ext.extentOne.distance.value * 10
+                    elif hasattr(ext.extentOne, 'entity'):
+                        try:
+                            to_ent = ext.extentOne.entity
+                            if hasattr(to_ent, 'geometry') and hasattr(to_ent.geometry, 'origin'):
+                                dist_val = to_ent.geometry.origin.z * 10
+                            elif hasattr(to_ent, 'centroid'):
+                                dist_val = to_ent.centroid.z * 10
+                        except Exception:
+                            pass
                 if abs(dist_val) < 0.001 and ext.faces and ext.faces.count > 0:
                     try:
                         zs = [ext.faces.item(fi).centroid.z * 10 for fi in range(ext.faces.count)]
