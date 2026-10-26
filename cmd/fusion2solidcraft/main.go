@@ -12,6 +12,7 @@ import (
 
 func main() {
 	fusionURL := flag.String("fusion-url", "http://127.0.0.1:27182/mcp", "Fusion 360 MCP URL")
+	inspectOnly := flag.Bool("inspect", false, "Inspect & lint model timeline without streaming to SolidCraft")
 	verify := flag.Bool("verify", true, "Verify intermediate B-Rep stats (volume, area, bbox)")
 	savePath := flag.String("save", "", "Path to save .solidcraft file")
 	jsonOut := flag.String("json-out", "", "Export CAD-IR JSON to this file")
@@ -34,18 +35,51 @@ func main() {
 		os.Exit(1)
 	}
 
-	fmt.Printf("Model: %s (%d timeline steps)\n", model.Name, len(model.Timeline))
+	// 3. Analyze Feature Coverage
+	typeCount := make(map[string]int)
+	unknownCount := 0
 	for _, step := range model.Timeline {
-		fmt.Printf("  [%02d] %-20s (type: %s)\n", step.Index, step.Name, step.Type)
+		typeCount[step.Type]++
+		if step.Type == "unknown" {
+			unknownCount++
+		}
 	}
 
+	totalSteps := len(model.Timeline)
+	knownSteps := totalSteps - unknownCount
+	coveragePct := 0.0
+	if totalSteps > 0 {
+		coveragePct = float64(knownSteps) / float64(totalSteps) * 100.0
+	}
+
+	fmt.Printf("\nModel: %s (%d total unrolled timeline steps)\n", model.Name, totalSteps)
+	fmt.Println("--- Feature Coverage Breakdown ---")
+	for fType, count := range typeCount {
+		fmt.Printf("  %-15s: %2d (%.1f%%)\n", fType, count, float64(count)/float64(totalSteps)*100.0)
+	}
+	fmt.Printf("\nOverall AST Coverage: %.1f%% (%d of %d steps mapped)\n", coveragePct, knownSteps, totalSteps)
+
+	// 4. Save JSON if requested
 	if *jsonOut != "" {
-		b, _ := json.MarshalIndent(model, "", "  ")
-		_ = os.WriteFile(*jsonOut, b, 0644)
-		fmt.Printf("Saved CAD-IR JSON to %s\n", *jsonOut)
+		b, err := json.MarshalIndent(model, "", "  ")
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "Failed to marshal JSON: %v\n", err)
+		} else {
+			if err := os.WriteFile(*jsonOut, b, 0644); err != nil {
+				fmt.Fprintf(os.Stderr, "Failed to write file %s: %v\n", *jsonOut, err)
+			} else {
+				fmt.Printf("Saved full CAD-IR JSON to: %s\n", *jsonOut)
+			}
+		}
 	}
 
-	// 3. Connect to SolidCraft
+	// If in inspect mode, exit now
+	if *inspectOnly {
+		fmt.Println("\nInspection complete (Inspect mode: skipped SolidCraft execution).")
+		return
+	}
+
+	// 5. Connect to SolidCraft
 	fmt.Println("\nConnecting to SolidCraft engine...")
 	scClient, err := solidcraft.Start()
 	if err != nil {
@@ -54,7 +88,7 @@ func main() {
 	}
 	defer scClient.Close()
 
-	// 4. Compile and Execute Timeline
+	// 6. Compile and Execute Timeline
 	fmt.Println("Compiling and replaying timeline into SolidCraft...")
 	compiler := solidcraft.NewCompiler(scClient)
 	results, err := compiler.CompileModel(model, *verify)
@@ -63,7 +97,7 @@ func main() {
 		os.Exit(1)
 	}
 
-	// 5. Digital Twin Verification Report
+	// 7. Digital Twin Verification Report
 	if *verify && len(results) > 0 {
 		fmt.Println("\n--- Digital Twin Verification Report ---")
 		fmt.Printf("%-5s | %-20s | %-8s | %-15s | %-15s\n", "Step", "Name", "Status", "Volume Diff %", "BBox Delta (mm)")
@@ -85,7 +119,7 @@ func main() {
 		}
 	}
 
-	// 6. Save model if requested
+	// 8. Save model if requested
 	if *savePath != "" {
 		fmt.Printf("\nSaving SolidCraft design to %s...\n", *savePath)
 		if err := scClient.Save(*savePath); err != nil {

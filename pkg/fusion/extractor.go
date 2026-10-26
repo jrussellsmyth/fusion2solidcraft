@@ -23,7 +23,6 @@ func (e *Extractor) ExtractModel() (*cadir.Model, error) {
 	tempFile := "/tmp/fusion_cadir_export.json"
 	_ = os.Remove(tempFile)
 
-	// Embedded python script to extract all features, sketches, profiles, and intermediate B-Rep stats directly to disk
 	script := fmt.Sprintf(`import adsk.core, adsk.fusion, json, math
 
 def run(_context: str):
@@ -40,12 +39,23 @@ def run(_context: str):
         "timeline": []
     }
 
-    # Timeline traversal
+    # Flatten timeline groups
+    flat_items = []
+    def collect(item):
+        if item.isGroup:
+            g = adsk.fusion.TimelineGroup.cast(item)
+            for j in range(g.count):
+                collect(g.item(j))
+        else:
+            flat_items.append(item)
+
     for i in range(design.timeline.count):
-        item = design.timeline.item(i)
+        collect(design.timeline.item(i))
+
+    for idx, item in enumerate(flat_items):
         entity = item.entity
         step_data = {
-            "index": i,
+            "index": idx,
             "name": item.name,
             "type": "unknown"
         }
@@ -75,28 +85,28 @@ def run(_context: str):
                         pass
                 
                 curves = []
-                for idx, line in enumerate(sketch.sketchCurves.sketchLines):
+                for l_idx, line in enumerate(sketch.sketchCurves.sketchLines):
                     sp = line.startSketchPoint.geometry
                     ep = line.endSketchPoint.geometry
                     curves.append({
-                        "id": f"l{idx+1}",
+                        "id": f"l{l_idx+1}",
                         "type": "line",
                         "start": {"x": sp.x * 10, "y": sp.y * 10},
                         "end": {"x": ep.x * 10, "y": ep.y * 10},
                         "construction": line.isConstruction
                     })
 
-                for idx, circle in enumerate(sketch.sketchCurves.sketchCircles):
+                for c_idx, circle in enumerate(sketch.sketchCurves.sketchCircles):
                     cp = circle.centerSketchPoint.geometry
                     curves.append({
-                        "id": f"c{idx+1}",
+                        "id": f"c{c_idx+1}",
                         "type": "circle",
                         "center": {"x": cp.x * 10, "y": cp.y * 10},
                         "radius": circle.radius * 10,
                         "construction": circle.isConstruction
                     })
 
-                for idx, arc in enumerate(sketch.sketchCurves.sketchArcs):
+                for a_idx, arc in enumerate(sketch.sketchCurves.sketchArcs):
                     cp = arc.centerSketchPoint.geometry
                     sp = arc.startSketchPoint.geometry
                     ep = arc.endSketchPoint.geometry
@@ -105,7 +115,7 @@ def run(_context: str):
                     p1 = ev.getParameterExtents()[2]
                     mid = ev.getPointAtParameter((p0 + p1) / 2)[1]
                     curves.append({
-                        "id": f"a{idx+1}",
+                        "id": f"a{a_idx+1}",
                         "type": "arc",
                         "center": {"x": cp.x * 10, "y": cp.y * 10},
                         "start": {"x": sp.x * 10, "y": sp.y * 10},
@@ -126,7 +136,7 @@ def run(_context: str):
                     })
 
                 step_data["sketch"] = {
-                    "id": f"sketch_{i+1}",
+                    "id": f"sketch_{idx+1}",
                     "name": item.name,
                     "plane": plane_name,
                     "curves": curves,
@@ -164,7 +174,7 @@ def run(_context: str):
                         pass
 
                 step_data["extrude"] = {
-                    "id": f"extrude_{i+1}",
+                    "id": f"extrude_{idx+1}",
                     "name": item.name,
                     "distance_mm": dist_val,
                     "operation": op_str,
@@ -187,24 +197,142 @@ def run(_context: str):
                     edges.append({"x": c.x * 10, "y": c.y * 10, "z": c.z * 10})
                     
                 step_data["fillet"] = {
-                    "id": f"fillet_{i+1}",
+                    "id": f"fillet_{idx+1}",
                     "name": item.name,
                     "radius_mm": rad,
                     "target_edges": edges
                 }
 
-        # Check intermediate body stats if bodies exist
-        if design.rootComponent.bRepBodies.count > 0:
-            b = design.rootComponent.bRepBodies.item(0)
-            bb = b.boundingBox
-            com = b.physicalProperties.centerOfMass
-            step_data["target_stats"] = {
-                "volume_mm3": b.volume * 1000,
-                "area_mm2": b.area * 100,
-                "bbox_min": {"x": bb.minPoint.x * 10, "y": bb.minPoint.y * 10, "z": bb.minPoint.z * 10},
-                "bbox_max": {"x": bb.maxPoint.x * 10, "y": bb.maxPoint.y * 10, "z": bb.maxPoint.z * 10},
-                "centroid": {"x": com.x * 10, "y": com.y * 10, "z": com.z * 10}
-            }
+            elif obj_type == 'CombineFeature':
+                step_data["type"] = "combine"
+                comb = adsk.fusion.CombineFeature.cast(entity)
+                op_map = {0: "join", 1: "cut", 2: "intersect"}
+                
+                target_name = ""
+                tool_names = []
+                try:
+                    if comb.targetBody:
+                        target_name = comb.targetBody.name
+                    tool_names = [t.name for t in comb.toolBodies]
+                except Exception:
+                    pass
+
+                step_data["combine"] = {
+                    "id": f"combine_{idx+1}",
+                    "name": item.name,
+                    "target_body": target_name,
+                    "tool_bodies": tool_names,
+                    "operation": op_map.get(comb.operation, "join"),
+                    "keep_tools": comb.isKeepToolBodies
+                }
+
+            elif obj_type == 'MoveFeature':
+                step_data["type"] = "move"
+                mf = adsk.fusion.MoveFeature.cast(entity)
+                t = mf.transform.translation
+                body_names = []
+                try:
+                    body_names = [b.name for b in mf.bodies]
+                except Exception:
+                    pass
+
+                step_data["move"] = {
+                    "id": f"move_{idx+1}",
+                    "name": item.name,
+                    "bodies": body_names,
+                    "translation": {"x": t.x * 10, "y": t.y * 10, "z": t.z * 10},
+                    "copy": False
+                }
+
+            elif obj_type == 'CopyPasteBody':
+                step_data["type"] = "move"
+                cp = adsk.fusion.CopyPasteBody.cast(entity)
+                src_bodies = []
+                try:
+                    src_bodies = [b.name for b in cp.sourceBody]
+                except Exception:
+                    pass
+
+                step_data["move"] = {
+                    "id": f"copy_{idx+1}",
+                    "name": item.name,
+                    "bodies": src_bodies,
+                    "translation": {"x": 0.0, "y": 0.0, "z": 0.0},
+                    "copy": True
+                }
+
+            elif obj_type == 'MirrorFeature':
+                step_data["type"] = "mirror"
+                mf = adsk.fusion.MirrorFeature.cast(entity)
+                pname = "XY"
+                try:
+                    if hasattr(mf.mirrorPlane, 'name'):
+                        pname = mf.mirrorPlane.name
+                except Exception:
+                    pass
+
+                step_data["mirror"] = {
+                    "id": f"mirror_{idx+1}",
+                    "name": item.name,
+                    "plane": pname,
+                    "target_bodies": []
+                }
+
+            elif obj_type == 'ConstructionPlane':
+                step_data["type"] = "plane"
+                cp = adsk.fusion.ConstructionPlane.cast(entity)
+                o = cp.geometry.origin
+                n = cp.geometry.normal
+                step_data["plane"] = {
+                    "id": f"plane_{idx+1}",
+                    "name": item.name,
+                    "origin": {"x": o.x * 10, "y": o.y * 10, "z": o.z * 10},
+                    "normal": {"x": n.x, "y": n.y, "z": n.z}
+                }
+
+            elif obj_type == 'ThreadFeature':
+                step_data["type"] = "thread"
+                tf = adsk.fusion.ThreadFeature.cast(entity)
+                desig = "ISO Metric"
+                try:
+                    desig = f"{tf.threadInfo.threadType} {tf.threadInfo.threadSize}"
+                except Exception:
+                    pass
+                step_data["thread"] = {
+                    "id": f"thread_{idx+1}",
+                    "name": item.name,
+                    "designation": desig,
+                    "modeled": tf.isModeled,
+                    "target_face": {"x": 0, "y": 0, "z": 0}
+                }
+
+            elif obj_type == 'Occurrence':
+                step_data["type"] = "occurrence"
+                occ = adsk.fusion.Occurrence.cast(entity)
+                step_data["occurrence"] = {
+                    "id": f"occ_{idx+1}",
+                    "name": item.name,
+                    "component": occ.component.name if occ.component else ""
+                }
+
+            elif obj_type == 'ConstructionAxis':
+                step_data["type"] = "plane"
+                step_data["plane"] = {
+                    "id": f"axis_{idx+1}",
+                    "name": item.name,
+                    "origin": {"x": 0, "y": 0, "z": 0},
+                    "normal": {"x": 0, "y": 0, "z": 1}
+                }
+
+            elif obj_type == 'RectangularPatternFeature':
+                step_data["type"] = "move"
+                step_data["move"] = {
+                    "id": f"pattern_{idx+1}",
+                    "name": item.name,
+                    "bodies": [],
+                    "translation": {"x": 0, "y": 0, "z": 0},
+                    "copy": True
+                }
 
         model_data["timeline"].append(step_data)
 
