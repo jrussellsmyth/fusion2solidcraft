@@ -78,6 +78,7 @@ type ExtrudeFeature struct {
 	ID                string               `json:"id"`
 	Name              string               `json:"name"`
 	DistanceMM        float64              `json:"distance_mm"`
+	StartOffsetMM     float64              `json:"start_offset_mm,omitempty"`
 	Operation         BooleanOp            `json:"operation"`
 	ProfileCentroids  []Point2D            `json:"profile_centroids"`
 	Profiles          []ExtrudeProfileInfo `json:"profiles,omitempty"`

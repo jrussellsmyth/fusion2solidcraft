@@ -459,6 +459,38 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 					if !found {
 						matched = append(matched, matchedProfile{Index: bestIdx, AreaMM2: bestArea})
 					}
+					// If Fusion's profile area is meaningfully larger than this single profile,
+					// check for internal hole profiles located within fp's bounding box that fill the deficit!
+					if fp.BBoxMin != nil && fp.BBoxMax != nil && fp.AreaMM2 > bestArea+0.5 {
+						deficit := fp.AreaMM2 - bestArea
+						for _, sp := range scProfiles {
+							if sp.Index == bestIdx {
+								continue
+							}
+							if len(sp.CentroidSketch) >= 2 {
+								cx := sp.CentroidSketch[0]
+								cy := sp.CentroidSketch[1]
+								tol := 0.1
+								if cx >= fp.BBoxMin.X-tol && cx <= fp.BBoxMax.X+tol &&
+									cy >= fp.BBoxMin.Y-tol && cy <= fp.BBoxMax.Y+tol {
+									if math.Abs(sp.AreaMM2-deficit) < 0.05 {
+										already := false
+										for _, m := range matched {
+											if m.Index == sp.Index {
+												already = true
+												break
+											}
+										}
+										if !already {
+											matched = append(matched, matchedProfile{Index: sp.Index, AreaMM2: sp.AreaMM2})
+											deficit -= sp.AreaMM2
+											break
+										}
+									}
+								}
+							}
+						}
+					}
 				} else if fp.BBoxMin != nil && fp.BBoxMax != nil && fp.AreaMM2 > 500.0 {
 					// Compound profile: match all sub-profiles inside bbox
 					tol := 0.5
@@ -610,10 +642,11 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 
 	if e.Operation == "join" && len(targetIndices) > 1 {
 		newParams := SolidExtrudeParams{
-			Name:      e.Name,
-			Distance:  e.DistanceMM,
-			Operation: "new",
-			Profiles:  profArg,
+			Name:        e.Name,
+			Distance:    e.DistanceMM,
+			StartOffset: e.StartOffsetMM,
+			Operation:   "new",
+			Profiles:    profArg,
 		}
 		if e.SketchName != "" {
 			newParams.Sketch = e.SketchName
@@ -650,11 +683,12 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 	}
 
 	extParams := SolidExtrudeParams{
-		Name:      e.Name,
-		Distance:  e.DistanceMM,
-		Operation: string(e.Operation),
-		Profiles:  profArg,
-		Targets:   targetBodies,
+		Name:        e.Name,
+		Distance:    e.DistanceMM,
+		StartOffset: e.StartOffsetMM,
+		Operation:   string(e.Operation),
+		Profiles:    profArg,
+		Targets:     targetBodies,
 	}
 	if e.Operation == "new" && desiredBodyName != "" {
 		extParams.BodyName = desiredBodyName
@@ -676,11 +710,15 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		succeededCount := 0
 		for _, idx := range targetIndices {
 			subParams := SolidExtrudeParams{
-				Name:      e.Name,
-				Distance:  e.DistanceMM,
-				Operation: string(e.Operation),
-				Profiles:  []int{idx},
-				Targets:   targetBodies,
+				Name:        e.Name,
+				Distance:    e.DistanceMM,
+				StartOffset: e.StartOffsetMM,
+				Operation:   string(e.Operation),
+				Profiles:    []int{idx},
+				Targets:     targetBodies,
+			}
+			if e.SketchName != "" {
+				subParams.Sketch = e.SketchName
 			}
 			if e.Operation == "new" && desiredBodyName != "" {
 				subParams.BodyName = desiredBodyName

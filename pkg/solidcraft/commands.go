@@ -46,14 +46,15 @@ type SketchSplineFitPointParams struct {
 
 // SolidExtrudeParams parameters for solid.extrude.
 type SolidExtrudeParams struct {
-	Name      string      `json:"name,omitempty"`
-	BodyName  string      `json:"body_name,omitempty"`
-	Sketch    string      `json:"sketch,omitempty"`
-	Face      []float64   `json:"face,omitempty"`
-	Distance  float64     `json:"distance"`
-	Operation string      `json:"operation,omitempty"` // "new", "join", "cut", "intersect"
-	Profiles  interface{} `json:"profiles,omitempty"`  // [0, 1] or "all"
-	Targets   []string    `json:"targets,omitempty"`   // explicit target bodies
+	Name        string      `json:"name,omitempty"`
+	BodyName    string      `json:"body_name,omitempty"`
+	Sketch      string      `json:"sketch,omitempty"`
+	Face        []float64   `json:"face,omitempty"`
+	Distance    float64     `json:"distance"`
+	StartOffset float64     `json:"start_offset,omitempty"`
+	Operation   string      `json:"operation,omitempty"` // "new", "join", "cut", "intersect"
+	Profiles    interface{} `json:"profiles,omitempty"`  // [0, 1] or "all"
+	Targets     []string    `json:"targets,omitempty"`   // explicit target bodies
 }
 
 // BodyRenameParams parameters for body.rename.

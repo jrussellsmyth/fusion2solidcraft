@@ -198,6 +198,16 @@ def run(_context: str):
                 op_str = op_map.get(ext.operation, "new")
                 
                 dist_val = 0.0
+                start_offset = 0.0
+                if hasattr(ext, 'startExtent') and ext.startExtent:
+                    se = ext.startExtent
+                    try:
+                        if hasattr(se, 'entity') and hasattr(se.entity, 'centroid'):
+                            start_offset = se.entity.centroid.z * 10
+                        elif hasattr(se, 'offset') and se.offset:
+                            start_offset = se.offset.value * 10
+                    except Exception:
+                        pass
                 if ext.extentOne:
                     if hasattr(ext.extentOne, 'distance') and ext.extentOne.distance:
                         dist_val = ext.extentOne.distance.value * 10
@@ -346,6 +356,28 @@ def run(_context: str):
                         except Exception:
                             pass
 
+                if not centroids and not profile_infos and hasattr(ext, 'endFaces') and ext.endFaces:
+                    try:
+                        for efi in range(ext.endFaces.count):
+                            ef = ext.endFaces.item(efi)
+                            if ef.area * 100 < 50.0:
+                                c = ef.centroid
+                                centroids.append({"x": c.x * 10, "y": c.y * 10})
+                                profile_infos.append({
+                                    "index": efi,
+                                    "area_mm2": ef.area * 100,
+                                    "centroid": {"x": c.x * 10, "y": c.y * 10}
+                                })
+                    except Exception:
+                        pass
+
+                if sketch_name == "":
+                    for prev_step in reversed(model_data["timeline"]):
+                        if prev_step.get("type") == "sketch":
+                            sketch_name = prev_step.get("sketch", {}).get("name", "")
+                            if sketch_name:
+                                break
+
                 if not centroids and not face_target:
                     try:
                         for f in ext.startFaces:
@@ -368,6 +400,7 @@ def run(_context: str):
                     "id": f"extrude_{idx+1}",
                     "name": item.name,
                     "distance_mm": dist_val,
+                    "start_offset_mm": start_offset,
                     "operation": op_str,
                     "profile_centroids": centroids,
                     "profiles": profile_infos,
