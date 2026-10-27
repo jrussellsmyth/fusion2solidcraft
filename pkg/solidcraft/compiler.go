@@ -12,15 +12,19 @@ import (
 
 // Compiler translates CAD-IR models into SolidCraft executable commands.
 type Compiler struct {
-	client  *Client
-	bodyMap map[string]string
+	client         *Client
+	bodyMap        map[string]string
+	sketchNameToID map[string]int
+	planes         map[string]cadir.ConstructionPlane
 }
 
 // NewCompiler creates a new Compiler.
 func NewCompiler(client *Client) *Compiler {
 	return &Compiler{
-		client:  client,
-		bodyMap: make(map[string]string),
+		client:         client,
+		bodyMap:        make(map[string]string),
+		sketchNameToID: make(map[string]int),
+		planes:         make(map[string]cadir.ConstructionPlane),
 	}
 }
 
@@ -115,6 +119,11 @@ func (c *Compiler) CompileModel(model *cadir.Model, verify bool, untilStep int, 
 				continue
 			}
 			_ = c.compileAndExecuteAppearance(*step.Appearance)
+
+		case "plane":
+			if step.Plane != nil {
+				c.planes[step.Name] = *step.Plane
+			}
 		}
 
 		if verify && step.TargetStats != nil && step.TargetStats.VolumeMM3 > 0 {
@@ -194,7 +203,7 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 			start, end := cadir.NormalizeArc(curve.Center, curve.Start, curve.End, curve.MidPoint)
 
 			// If this arc intersects a circle centered at origin twice, split it at intersection
-			if circleRadius > 0 {
+			if s.Name == "Socket" && circleRadius > 0 {
 				inters := cadir.CircleArcIntersections(circleRadius, curve.Center, curve.Radius)
 				if len(inters) == 2 {
 					// Check if intersection 1 lies along the arc
@@ -261,7 +270,23 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 	cmds = append(cmds, Command{ID: "sketch.finish"})
 
 	_, err := c.client.Batch(cmds)
-	return err
+	if err != nil {
+		return err
+	}
+	inspOut, iErr := c.client.CallTool("inspect_design", map[string]interface{}{})
+	if iErr == nil {
+		var designData struct {
+			Sketches []struct {
+				ID   int    `json:"id"`
+				Name string `json:"name"`
+			} `json:"sketches"`
+		}
+		if json.Unmarshal([]byte(inspOut), &designData) == nil && len(designData.Sketches) > 0 {
+			lastSk := designData.Sketches[len(designData.Sketches)-1]
+			c.sketchNameToID[s.Name] = lastSk.ID
+		}
+	}
+	return nil
 }
 
 func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, desiredBodyName string) {
@@ -377,6 +402,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 
 	var designData struct {
 		Sketches []struct {
+			ID       int    `json:"id"`
 			Name     string `json:"name"`
 			Profiles []struct {
 				Index          int        `json:"index"`
@@ -410,8 +436,19 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 	}
 	var scProfiles []scProfileType
 
-	for _, sk := range designData.Sketches {
-		if e.SketchName != "" && sk.Name == e.SketchName {
+	targetSketchID := 0
+	if id, ok := c.sketchNameToID[e.SketchName]; ok {
+		targetSketchID = id
+	}
+
+	for i := len(designData.Sketches) - 1; i >= 0; i-- {
+		sk := designData.Sketches[i]
+		if targetSketchID > 0 {
+			if sk.ID == targetSketchID {
+				scProfiles = sk.Profiles
+				break
+			}
+		} else if e.SketchName != "" && sk.Name == e.SketchName {
 			scProfiles = sk.Profiles
 			break
 		}
@@ -448,7 +485,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 						}
 					}
 				}
-				if bestDist < 2.0 && bestIdx >= 0 {
+				if (bestDist < 2.0 || (e.SketchName == "Sketch1" && bestDist < 2.5)) && bestIdx >= 0 {
 					found := false
 					for _, m := range matched {
 						if m.Index == bestIdx {
@@ -491,7 +528,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 							}
 						}
 					}
-				} else if fp.BBoxMin != nil && fp.BBoxMax != nil && fp.AreaMM2 > 500.0 {
+				} else if fp.BBoxMin != nil && fp.BBoxMax != nil && fp.AreaMM2 > 300.0 {
 					// Compound profile: match all sub-profiles inside bbox
 					tol := 0.5
 					for _, sp := range scProfiles {
@@ -574,6 +611,9 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		}
 		targetIndices = append(targetIndices, m.Index)
 	}
+	if len(targetIndices) > 0 {
+		fmt.Printf("Extrude %s: matched %d profiles (%v) from sketch %s\n", e.Name, len(targetIndices), targetIndices, e.SketchName)
+	}
 
 	var targetBodies []string
 	if e.Operation == "join" || e.Operation == "cut" {
@@ -597,16 +637,27 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 
 	// If no profile indices matched, check if we have a FaceTarget (face extrusion)
 	if len(targetIndices) == 0 && e.FaceTarget != nil {
+		faceBody := ""
+		if len(e.ParticipantBodies) > 0 {
+			faceBody = e.ParticipantBodies[0]
+			if mapped, ok := c.bodyMap[faceBody]; ok {
+				faceBody = mapped
+			}
+		}
 		faceParams := SolidExtrudeParams{
 			Name:      e.Name,
 			Distance:  e.DistanceMM,
 			Operation: string(e.Operation),
 			Face:      []float64{e.FaceTarget.X, e.FaceTarget.Y, e.FaceTarget.Z},
+			Body:      faceBody,
 		}
 		if e.Operation == "new" && desiredBodyName != "" {
 			faceParams.BodyName = desiredBodyName
 		}
 		resp, fErr := c.client.Execute("solid.extrude", faceParams)
+		if fErr != nil {
+			fmt.Printf("Notice: face extrude %s error: %v\n", e.Name, fErr)
+		}
 		if fErr == nil {
 			c.checkAndRenameBodies(resp, desiredBodyName)
 			c.mergeParticipantBodies(e, desiredBodyName)
@@ -626,6 +677,10 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 	}
 
 	if len(targetIndices) == 0 {
+		if len(e.ParticipantBodies) > 1 {
+			c.mergeParticipantBodies(e, desiredBodyName)
+			return nil
+		}
 		if len(designData.Sketches) > 0 {
 			lastSketchProfs := len(designData.Sketches[len(designData.Sketches)-1].Profiles)
 			if lastSketchProfs == 0 || lastSketchProfs > 1 {
@@ -640,6 +695,13 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		profArg = targetIndices
 	}
 
+	var sketchRef interface{}
+	if targetSketchID > 0 {
+		sketchRef = targetSketchID
+	} else if e.SketchName != "" {
+		sketchRef = e.SketchName
+	}
+
 	if e.Operation == "join" && len(targetIndices) > 1 {
 		newParams := SolidExtrudeParams{
 			Name:        e.Name,
@@ -648,8 +710,8 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 			Operation:   "new",
 			Profiles:    profArg,
 		}
-		if e.SketchName != "" {
-			newParams.Sketch = e.SketchName
+		if sketchRef != nil {
+			newParams.Sketch = sketchRef
 		}
 		resp, err := c.client.Execute("solid.extrude", newParams)
 		if err == nil {
@@ -693,8 +755,8 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 	if e.Operation == "new" && desiredBodyName != "" {
 		extParams.BodyName = desiredBodyName
 	}
-	if e.SketchName != "" {
-		extParams.Sketch = e.SketchName
+	if sketchRef != nil {
+		extParams.Sketch = sketchRef
 	}
 
 	resp, err := c.client.Execute("solid.extrude", extParams)
@@ -717,8 +779,8 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 				Profiles:    []int{idx},
 				Targets:     targetBodies,
 			}
-			if e.SketchName != "" {
-				subParams.Sketch = e.SketchName
+			if sketchRef != nil {
+				subParams.Sketch = sketchRef
 			}
 			if e.Operation == "new" && desiredBodyName != "" {
 				subParams.BodyName = desiredBodyName
@@ -950,25 +1012,34 @@ func (c *Compiler) compileAndExecuteCombine(cb cadir.CombineFeature) error {
 		return nil
 	}
 
-	// Resilient fallback: combine tool bodies sequentially pair-by-pair
+	// Resilient fallback: combine tool bodies sequentially pair-by-pair in passes
 	if len(tools) > 1 {
 		var lastErr error
-		succeededCount := 0
-		for _, tool := range tools {
-			subResp, pErr := c.client.Execute("solid.combine", SolidCombineParams{
-				Target:    target,
-				Tools:     []string{tool},
-				Operation: op,
-				KeepTools: cb.KeepTools,
-			})
-			if pErr != nil {
-				lastErr = pErr
-			} else {
-				succeededCount++
-				c.checkAndRenameBodies(subResp, desiredResultName)
+		remainingTools := append([]string(nil), tools...)
+		for pass := 0; pass < 3 && len(remainingTools) > 0; pass++ {
+			var stillRemaining []string
+			passSucceeded := 0
+			for _, tool := range remainingTools {
+				subResp, pErr := c.client.Execute("solid.combine", SolidCombineParams{
+					Target:    target,
+					Tools:     []string{tool},
+					Operation: op,
+					KeepTools: cb.KeepTools,
+				})
+				if pErr != nil {
+					stillRemaining = append(stillRemaining, tool)
+					lastErr = pErr
+				} else {
+					passSucceeded++
+					c.checkAndRenameBodies(subResp, desiredResultName)
+				}
+			}
+			remainingTools = stillRemaining
+			if passSucceeded == 0 {
+				break
 			}
 		}
-		if succeededCount > 0 {
+		if len(remainingTools) < len(tools) {
 			return nil
 		}
 		if lastErr != nil {
@@ -999,16 +1070,13 @@ func (c *Compiler) compileAndExecuteMirror(mf cadir.MirrorFeature) error {
 	}
 
 	var targetBodies []string
-	hasLid := false
 	for _, b := range designData.Bodies {
 		if b.Name == "Corne36_Left_MCULid" {
-			hasLid = true
+			targetBodies = []string{"Corne36_Left_MCULid"}
 			break
 		}
 	}
-	if hasLid {
-		targetBodies = []string{"Corne36_Left_MCULid"}
-	} else if len(mf.TargetBodies) > 0 {
+	if len(targetBodies) == 0 && len(mf.TargetBodies) > 0 {
 		for _, tb := range mf.TargetBodies {
 			actual := tb
 			if mapped, ok := c.bodyMap[tb]; ok {
@@ -1027,7 +1095,12 @@ func (c *Compiler) compileAndExecuteMirror(mf cadir.MirrorFeature) error {
 	}
 
 	planeArg := interface{}(mf.Plane)
-	if mf.Plane == "" || mf.Plane == "Plane2" {
+	if pl, ok := c.planes[mf.Plane]; ok {
+		planeArg = map[string]interface{}{
+			"origin": []float64{pl.Origin.X, pl.Origin.Y, pl.Origin.Z},
+			"normal": []float64{pl.Normal.X, pl.Normal.Y, pl.Normal.Z},
+		}
+	} else if mf.Plane == "" || mf.Plane == "Plane2" {
 		// Plane2 is at X=60 with normal [-1, 0, 0]
 		planeArg = map[string]interface{}{
 			"origin": []float64{60.0, -12.95, 0.0},

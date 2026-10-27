@@ -48,7 +48,8 @@ type SketchSplineFitPointParams struct {
 type SolidExtrudeParams struct {
 	Name        string      `json:"name,omitempty"`
 	BodyName    string      `json:"body_name,omitempty"`
-	Sketch      string      `json:"sketch,omitempty"`
+	Body        string      `json:"body,omitempty"`
+	Sketch      interface{} `json:"sketch,omitempty"`
 	Face        []float64   `json:"face,omitempty"`
 	Distance    float64     `json:"distance"`
 	StartOffset float64     `json:"start_offset,omitempty"`
