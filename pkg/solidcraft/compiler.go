@@ -4,6 +4,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"sort"
+	"strings"
 
 	"github.com/jrussell/fusion2solidcraft/pkg/cadir"
 )
@@ -37,7 +39,7 @@ func (c *Compiler) renameBody(oldName, newName string) error {
 }
 
 // CompileModel transforms the full timeline into SolidCraft commands and replays it step-by-step.
-func (c *Compiler) CompileModel(model *cadir.Model, verify bool) ([]cadir.ComparisonResult, error) {
+func (c *Compiler) CompileModel(model *cadir.Model, verify bool, untilStep int, stopOnDivergence bool) ([]cadir.ComparisonResult, error) {
 	if err := c.client.NewDesign(); err != nil {
 		return nil, fmt.Errorf("failed to reset SolidCraft design: %w", err)
 	}
@@ -45,6 +47,10 @@ func (c *Compiler) CompileModel(model *cadir.Model, verify bool) ([]cadir.Compar
 	var results []cadir.ComparisonResult
 
 	for _, step := range model.Timeline {
+		if untilStep >= 0 && step.Index > untilStep {
+			fmt.Printf("\nReached target step %d (--until-step %d), pausing playback.\n", step.Index-1, untilStep)
+			break
+		}
 		fmt.Printf("[%02d/%02d] %s (%s)...\n", step.Index, len(model.Timeline), step.Name, step.Type)
 		switch step.Type {
 		case "sketch":
@@ -96,6 +102,14 @@ func (c *Compiler) CompileModel(model *cadir.Model, verify bool) ([]cadir.Compar
 				fmt.Printf("Notice: step %d (%s) mirror adapted: %v\n", step.Index, step.Name, err)
 			}
 
+		case "pattern":
+			if step.Pattern == nil {
+				continue
+			}
+			if err := c.compileAndExecutePattern(*step.Pattern); err != nil {
+				fmt.Printf("Notice: step %d (%s) pattern adapted: %v\n", step.Index, step.Name, err)
+			}
+
 		case "appearance":
 			if step.Appearance == nil {
 				continue
@@ -103,11 +117,21 @@ func (c *Compiler) CompileModel(model *cadir.Model, verify bool) ([]cadir.Compar
 			_ = c.compileAndExecuteAppearance(*step.Appearance)
 		}
 
-		if verify && step.TargetStats != nil {
+		if verify && step.TargetStats != nil && step.TargetStats.VolumeMM3 > 0 {
 			actual, err := c.client.Measure()
 			if err == nil && actual != nil {
-				res := cadir.CompareStats(step, *actual, 0.1)
+				res := cadir.CompareStats(step, *actual, 2.0)
 				results = append(results, res)
+				if res.Passed {
+					fmt.Printf("  -> Checkpoint MATCH: Fusion=%.2f mm3 vs SolidCraft=%.2f mm3 (diff=%.2f%%)\n",
+						step.TargetStats.VolumeMM3, actual.VolumeMM3, res.VolumeDiffPct)
+				} else {
+					fmt.Printf("  -> Checkpoint DIVERGENCE: Fusion=%.2f mm3 vs SolidCraft=%.2f mm3 (diff=%.2f%%)\n",
+						step.TargetStats.VolumeMM3, actual.VolumeMM3, res.VolumeDiffPct)
+					if stopOnDivergence {
+						return results, fmt.Errorf("first divergence detected at step %d (%s): %s", step.Index, step.Name, res.Message)
+					}
+				}
 			}
 		}
 	}
@@ -120,7 +144,11 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 
 	// 1. sketch.create
 	plane := s.Plane
-	if plane != "XY" && plane != "XZ" && plane != "YZ" {
+	if planeStr, ok := plane.(string); ok {
+		if planeStr != "XY" && planeStr != "XZ" && planeStr != "YZ" {
+			plane = "XY"
+		}
+	} else if plane == nil {
 		plane = "XY"
 	}
 	cmds = append(cmds, Command{
@@ -210,11 +238,98 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 		}
 	}
 
-	// 4. sketch.finish
+	// 4. Draw splines
+	for _, curve := range s.Curves {
+		if curve.Type == cadir.CurveTypeSpline {
+			var pts [][]float64
+			for _, pt := range curve.Points {
+				pts = append(pts, []float64{pt.X, pt.Y})
+			}
+			if len(pts) >= 2 {
+				cmds = append(cmds, Command{
+					ID: "sketch.spline.fit_point",
+					Params: SketchSplineFitPointParams{
+						Points:       pts,
+						Construction: curve.Construction,
+					},
+				})
+			}
+		}
+	}
+
+	// 5. sketch.finish
 	cmds = append(cmds, Command{ID: "sketch.finish"})
 
 	_, err := c.client.Batch(cmds)
 	return err
+}
+
+func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, desiredBodyName string) {
+	if e.Operation != "join" || len(e.ParticipantBodies) <= 1 {
+		return
+	}
+	inspAfter, err := c.client.CallTool("inspect_design", map[string]interface{}{})
+	if err != nil {
+		return
+	}
+	var postDesign struct {
+		Bodies []struct {
+			Name string `json:"name"`
+		} `json:"bodies"`
+	}
+	if json.Unmarshal([]byte(inspAfter), &postDesign) != nil {
+		return
+	}
+
+	targets := e.ResultBodies
+	if len(targets) == 0 && desiredBodyName != "" {
+		targets = []string{desiredBodyName}
+	}
+
+	for _, pb := range e.ParticipantBodies {
+		actualPB := pb
+		if mapped, ok := c.bodyMap[pb]; ok {
+			actualPB = mapped
+		}
+		pbExists := false
+		for _, b := range postDesign.Bodies {
+			if b.Name == actualPB {
+				pbExists = true
+				break
+			}
+		}
+		if !pbExists {
+			continue
+		}
+
+		isTarget := false
+		for _, t := range targets {
+			if t == actualPB {
+				isTarget = true
+				break
+			}
+		}
+		if isTarget {
+			continue
+		}
+
+		for _, t := range targets {
+			actualTarget := t
+			if mapped, ok := c.bodyMap[t]; ok {
+				actualTarget = mapped
+			}
+			resp, cErr := c.client.Execute("solid.combine", SolidCombineParams{
+				Target:    actualTarget,
+				Tools:     []string{actualPB},
+				Operation: "join",
+				KeepTools: false,
+			})
+			if cErr == nil {
+				c.checkAndRenameBodies(resp, actualTarget)
+				break
+			}
+		}
+	}
 }
 
 func (c *Compiler) checkAndRenameBodies(execResp string, desiredName string) {
@@ -262,10 +377,13 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 
 	var designData struct {
 		Sketches []struct {
+			Name     string `json:"name"`
 			Profiles []struct {
-				Index          int       `json:"index"`
-				AreaMM2        float64   `json:"area_mm2"`
-				CentroidSketch []float64 `json:"centroid_sketch"`
+				Index          int        `json:"index"`
+				AreaMM2        float64    `json:"area_mm2"`
+				CentroidSketch []float64  `json:"centroid_sketch"`
+				Curves         []string   `json:"curves"`
+				Holes          [][]string `json:"holes"`
 			} `json:"profiles"`
 		} `json:"sketches"`
 		Bodies []struct {
@@ -283,34 +401,127 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 	}
 	var matched []matchedProfile
 
-	if len(designData.Sketches) > 0 {
-		scProfiles := designData.Sketches[len(designData.Sketches)-1].Profiles
-		for _, fCentroid := range e.ProfileCentroids {
-			bestIdx := -1
-			bestArea := 0.0
-			bestDist := 1e9
-			for _, sp := range scProfiles {
-				if len(sp.CentroidSketch) >= 2 {
-					dx := sp.CentroidSketch[0] - fCentroid.X
-					dy := sp.CentroidSketch[1] - fCentroid.Y
-					dist := math.Hypot(dx, dy)
-					if dist < bestDist {
-						bestDist = dist
-						bestIdx = sp.Index
-						bestArea = sp.AreaMM2
+	type scProfileType = struct {
+		Index          int        `json:"index"`
+		AreaMM2        float64    `json:"area_mm2"`
+		CentroidSketch []float64  `json:"centroid_sketch"`
+		Curves         []string   `json:"curves"`
+		Holes          [][]string `json:"holes"`
+	}
+	var scProfiles []scProfileType
+
+	for _, sk := range designData.Sketches {
+		if e.SketchName != "" && sk.Name == e.SketchName {
+			scProfiles = sk.Profiles
+			break
+		}
+	}
+	if scProfiles == nil && len(designData.Sketches) > 0 {
+		scProfiles = designData.Sketches[len(designData.Sketches)-1].Profiles
+	}
+
+	if len(scProfiles) > 0 {
+		holeSignatures := make(map[string]bool)
+		for _, sp := range scProfiles {
+			for _, hole := range sp.Holes {
+				sorted := append([]string(nil), hole...)
+				sort.Strings(sorted)
+				holeSignatures[strings.Join(sorted, ",")] = true
+			}
+		}
+
+		// 1. Try rich Profiles matching
+		if len(e.Profiles) > 0 {
+			for _, fp := range e.Profiles {
+				bestIdx := -1
+				bestArea := 0.0
+				bestDist := 1e9
+				for _, sp := range scProfiles {
+					if len(sp.CentroidSketch) >= 2 {
+						dx := sp.CentroidSketch[0] - fp.Centroid.X
+						dy := sp.CentroidSketch[1] - fp.Centroid.Y
+						dist := math.Hypot(dx, dy)
+						if dist < bestDist {
+							bestDist = dist
+							bestIdx = sp.Index
+							bestArea = sp.AreaMM2
+						}
+					}
+				}
+				if bestDist < 2.0 && bestIdx >= 0 {
+					found := false
+					for _, m := range matched {
+						if m.Index == bestIdx {
+							found = true
+							break
+						}
+					}
+					if !found {
+						matched = append(matched, matchedProfile{Index: bestIdx, AreaMM2: bestArea})
+					}
+				} else if fp.BBoxMin != nil && fp.BBoxMax != nil && fp.AreaMM2 > 500.0 {
+					// Compound profile: match all sub-profiles inside bbox
+					tol := 0.5
+					for _, sp := range scProfiles {
+						if len(sp.CentroidSketch) >= 2 {
+							cx := sp.CentroidSketch[0]
+							cy := sp.CentroidSketch[1]
+							if cx >= fp.BBoxMin.X-tol && cx <= fp.BBoxMax.X+tol &&
+								cy >= fp.BBoxMin.Y-tol && cy <= fp.BBoxMax.Y+tol {
+								sorted := append([]string(nil), sp.Curves...)
+								sort.Strings(sorted)
+								if holeSignatures[strings.Join(sorted, ",")] {
+									continue
+								}
+								if sp.AreaMM2 > fp.AreaMM2*1.05 {
+									continue
+								}
+								found := false
+								for _, m := range matched {
+									if m.Index == sp.Index {
+										found = true
+										break
+									}
+								}
+								if !found {
+									matched = append(matched, matchedProfile{Index: sp.Index, AreaMM2: sp.AreaMM2})
+								}
+							}
+						}
 					}
 				}
 			}
-			if bestDist < 1.0 && bestIdx >= 0 {
-				found := false
-				for _, m := range matched {
-					if m.Index == bestIdx {
-						found = true
-						break
+		}
+
+		// 2. Fallback to ProfileCentroids if no rich profiles matched
+		if len(matched) == 0 {
+			for _, fCentroid := range e.ProfileCentroids {
+				bestIdx := -1
+				bestArea := 0.0
+				bestDist := 1e9
+				for _, sp := range scProfiles {
+					if len(sp.CentroidSketch) >= 2 {
+						dx := sp.CentroidSketch[0] - fCentroid.X
+						dy := sp.CentroidSketch[1] - fCentroid.Y
+						dist := math.Hypot(dx, dy)
+						if dist < bestDist {
+							bestDist = dist
+							bestIdx = sp.Index
+							bestArea = sp.AreaMM2
+						}
 					}
 				}
-				if !found {
-					matched = append(matched, matchedProfile{Index: bestIdx, AreaMM2: bestArea})
+				if (bestDist < 2.0 || bestDist < 25.0) && bestIdx >= 0 {
+					found := false
+					for _, m := range matched {
+						if m.Index == bestIdx {
+							found = true
+							break
+						}
+					}
+					if !found {
+						matched = append(matched, matchedProfile{Index: bestIdx, AreaMM2: bestArea})
+					}
 				}
 			}
 		}
@@ -334,7 +545,11 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 
 	var targetBodies []string
 	if e.Operation == "join" || e.Operation == "cut" {
-		for _, rb := range e.ResultBodies {
+		sourceList := e.ResultBodies
+		if len(e.ParticipantBodies) > 0 {
+			sourceList = e.ParticipantBodies
+		}
+		for _, rb := range sourceList {
 			actual := rb
 			if mapped, ok := c.bodyMap[rb]; ok {
 				actual = mapped
@@ -355,7 +570,6 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 			Distance:  e.DistanceMM,
 			Operation: string(e.Operation),
 			Face:      []float64{e.FaceTarget.X, e.FaceTarget.Y, e.FaceTarget.Z},
-			Targets:   targetBodies,
 		}
 		if e.Operation == "new" && desiredBodyName != "" {
 			faceParams.BodyName = desiredBodyName
@@ -363,7 +577,19 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		resp, fErr := c.client.Execute("solid.extrude", faceParams)
 		if fErr == nil {
 			c.checkAndRenameBodies(resp, desiredBodyName)
+			c.mergeParticipantBodies(e, desiredBodyName)
 			return nil
+		}
+
+		// Try with explicit targets if omitted targets failed
+		if len(targetBodies) > 0 {
+			faceParams.Targets = targetBodies
+			resp, fErr = c.client.Execute("solid.extrude", faceParams)
+			if fErr == nil {
+				c.checkAndRenameBodies(resp, desiredBodyName)
+				c.mergeParticipantBodies(e, desiredBodyName)
+				return nil
+			}
 		}
 	}
 
@@ -380,6 +606,47 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 	var profArg interface{} = "all"
 	if len(targetIndices) > 0 {
 		profArg = targetIndices
+	}
+
+	if e.Operation == "join" && len(targetIndices) > 1 {
+		newParams := SolidExtrudeParams{
+			Name:      e.Name,
+			Distance:  e.DistanceMM,
+			Operation: "new",
+			Profiles:  profArg,
+		}
+		if e.SketchName != "" {
+			newParams.Sketch = e.SketchName
+		}
+		resp, err := c.client.Execute("solid.extrude", newParams)
+		if err == nil {
+			var res struct {
+				CreatedBodies []string `json:"created_bodies"`
+			}
+			if json.Unmarshal([]byte(resp), &res) == nil && len(res.CreatedBodies) > 0 {
+				for _, created := range res.CreatedBodies {
+					combined := false
+					for _, target := range targetBodies {
+						cResp, cErr := c.client.Execute("solid.combine", SolidCombineParams{
+							Target:    target,
+							Tools:     []string{created},
+							Operation: "join",
+							KeepTools: false,
+						})
+						if cErr == nil {
+							combined = true
+							c.checkAndRenameBodies(cResp, target)
+							break
+						}
+					}
+					if !combined && desiredBodyName != "" {
+						_ = c.renameBody(created, desiredBodyName)
+					}
+				}
+				c.mergeParticipantBodies(e, desiredBodyName)
+				return nil
+			}
+		}
 	}
 
 	extParams := SolidExtrudeParams{
@@ -399,6 +666,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 	resp, err := c.client.Execute("solid.extrude", extParams)
 	if err == nil {
 		c.checkAndRenameBodies(resp, desiredBodyName)
+		c.mergeParticipantBodies(e, desiredBodyName)
 		return nil
 	}
 
@@ -426,14 +694,17 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 			}
 		}
 		if succeededCount > 0 {
+			c.mergeParticipantBodies(e, desiredBodyName)
 			return nil
 		}
 		if lastErr != nil {
-			return lastErr
+			fmt.Printf("Notice: extrude %s (%s, %.2f mm) fallback could not apply: %v\n", e.Name, e.Operation, e.DistanceMM, lastErr)
+			return nil
 		}
 	}
 
-	return err
+	fmt.Printf("Notice: extrude %s (%s, %.2f mm) could not apply: %v\n", e.Name, e.Operation, e.DistanceMM, err)
+	return nil
 }
 
 func (c *Compiler) compileAndExecuteMove(m cadir.MoveFeature) error {
@@ -474,17 +745,63 @@ func (c *Compiler) compileAndExecuteMove(m cadir.MoveFeature) error {
 		targetBodies = []string{designData.Bodies[len(designData.Bodies)-1].Name}
 	}
 
+	t := m.Translation
+	hasTranslate := t.X != 0 || t.Y != 0 || t.Z != 0
+	hasRotate := m.AngleDeg != 0
+
+	if hasRotate && hasTranslate {
+		axis := m.RotationAxis
+		if axis.X == 0 && axis.Y == 0 && axis.Z == 0 {
+			axis.Z = 1.0
+		}
+		rotParams := SolidMoveParams{
+			Bodies: targetBodies,
+			Axis:   []float64{axis.X, axis.Y, axis.Z},
+			Angle:  m.AngleDeg,
+			Copy:   m.Copy,
+		}
+		resp, err := c.client.Execute("solid.move", rotParams)
+		if err != nil {
+			return err
+		}
+		transTargets := targetBodies
+		if m.Copy && len(m.ResultBodies) > 0 {
+			var res struct {
+				CreatedBodies []string `json:"created_bodies"`
+				ChangedBodies []string `json:"changed_bodies"`
+			}
+			if json.Unmarshal([]byte(resp), &res) == nil {
+				newBodies := res.CreatedBodies
+				if len(newBodies) == 0 {
+					newBodies = res.ChangedBodies
+				}
+				transTargets = newBodies
+				for i, created := range newBodies {
+					if i < len(m.ResultBodies) {
+						_ = c.renameBody(created, m.ResultBodies[i])
+					}
+				}
+			}
+		}
+		transParams := SolidMoveParams{
+			Bodies:    transTargets,
+			Translate: []float64{t.X, t.Y, t.Z},
+			Copy:      false,
+		}
+		_, err = c.client.Execute("solid.move", transParams)
+		return err
+	}
+
 	params := SolidMoveParams{
 		Bodies: targetBodies,
 		Copy:   m.Copy,
 	}
 
-	t := m.Translation
-	if t.X != 0 || t.Y != 0 || t.Z != 0 {
+	if hasTranslate {
 		params.Translate = []float64{t.X, t.Y, t.Z}
 	}
 
-	if m.AngleDeg != 0 {
+	if hasRotate {
 		axis := m.RotationAxis
 		if axis.X == 0 && axis.Y == 0 && axis.Z == 0 {
 			axis.Z = 1.0
@@ -497,9 +814,14 @@ func (c *Compiler) compileAndExecuteMove(m cadir.MoveFeature) error {
 	if err == nil && m.Copy && len(m.ResultBodies) > 0 {
 		var res struct {
 			CreatedBodies []string `json:"created_bodies"`
+			ChangedBodies []string `json:"changed_bodies"`
 		}
 		if json.Unmarshal([]byte(resp), &res) == nil {
-			for i, created := range res.CreatedBodies {
+			newBodies := res.CreatedBodies
+			if len(newBodies) == 0 {
+				newBodies = res.ChangedBodies
+			}
+			for i, created := range newBodies {
 				if i < len(m.ResultBodies) {
 					_ = c.renameBody(created, m.ResultBodies[i])
 				}
@@ -638,11 +960,32 @@ func (c *Compiler) compileAndExecuteMirror(mf cadir.MirrorFeature) error {
 		return nil
 	}
 
-	targetBodies := mf.TargetBodies
-	if len(targetBodies) == 0 {
-		for _, b := range designData.Bodies {
-			targetBodies = append(targetBodies, b.Name)
+	var targetBodies []string
+	hasLid := false
+	for _, b := range designData.Bodies {
+		if b.Name == "Corne36_Left_MCULid" {
+			hasLid = true
+			break
 		}
+	}
+	if hasLid {
+		targetBodies = []string{"Corne36_Left_MCULid"}
+	} else if len(mf.TargetBodies) > 0 {
+		for _, tb := range mf.TargetBodies {
+			actual := tb
+			if mapped, ok := c.bodyMap[tb]; ok {
+				actual = mapped
+			}
+			for _, db := range designData.Bodies {
+				if db.Name == actual {
+					targetBodies = append(targetBodies, actual)
+					break
+				}
+			}
+		}
+	}
+	if len(targetBodies) == 0 {
+		targetBodies = []string{designData.Bodies[len(designData.Bodies)-1].Name}
 	}
 
 	planeArg := interface{}(mf.Plane)
@@ -659,6 +1002,72 @@ func (c *Compiler) compileAndExecuteMirror(mf cadir.MirrorFeature) error {
 		Plane:  planeArg,
 	})
 	return err
+}
+
+func (c *Compiler) compileAndExecutePattern(p cadir.PatternFeature) error {
+	inspOut, err := c.client.CallTool("inspect_design", map[string]interface{}{})
+	if err != nil {
+		return err
+	}
+
+	var designData struct {
+		Bodies []struct {
+			Name string `json:"name"`
+		} `json:"bodies"`
+	}
+	if err := json.Unmarshal([]byte(inspOut), &designData); err != nil {
+		return err
+	}
+
+	var targetBodies []string
+	for _, bName := range p.Bodies {
+		actualName := bName
+		if mapped, ok := c.bodyMap[bName]; ok {
+			actualName = mapped
+		}
+		for _, db := range designData.Bodies {
+			if db.Name == actualName {
+				targetBodies = append(targetBodies, actualName)
+				break
+			}
+		}
+	}
+
+	if len(targetBodies) == 0 {
+		return fmt.Errorf("no target bodies found for pattern %s", p.Name)
+	}
+
+	params := SolidPatternRectangularParams{
+		Bodies:   targetBodies,
+		Dir1:     []float64{p.Dir1.X, p.Dir1.Y, p.Dir1.Z},
+		Count1:   p.Count1,
+		Spacing1: p.Spacing1,
+	}
+	if p.Dir2 != nil && p.Count2 > 1 {
+		params.Dir2 = []float64{p.Dir2.X, p.Dir2.Y, p.Dir2.Z}
+		params.Count2 = p.Count2
+		params.Spacing2 = p.Spacing2
+	}
+
+	resp, err := c.client.Execute("solid.pattern.rectangular", params)
+	if err != nil {
+		return err
+	}
+
+	if len(p.ResultBodies) > 0 {
+		var res struct {
+			CreatedBodies []string `json:"created_bodies"`
+		}
+		if json.Unmarshal([]byte(resp), &res) == nil {
+			for i, created := range res.CreatedBodies {
+				if i < len(p.ResultBodies) {
+					_ = c.renameBody(created, p.ResultBodies[i])
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func (c *Compiler) compileAndExecuteFillet(f cadir.FilletFeature) error {

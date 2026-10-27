@@ -33,6 +33,7 @@ def run(_context: str):
         with open('%s', 'w') as f:
             json.dump({"error": "No active design"}, f)
         return
+    root = design.rootComponent
 
     model_data = {
         "name": doc.name if doc else "Untitled",
@@ -50,7 +51,15 @@ def run(_context: str):
             flat_items.append(item)
 
     for i in range(design.timeline.count):
-        collect(design.timeline.item(i))
+        item = design.timeline.item(i)
+        if item.isGroup:
+            try:
+                g = adsk.fusion.TimelineGroup.cast(item)
+                if g:
+                    g.isCollapsed = False
+            except Exception:
+                pass
+        collect(item)
 
     for idx, item in enumerate(flat_items):
         entity = item.entity
@@ -62,7 +71,7 @@ def run(_context: str):
 
         if hasattr(entity, 'objectType'):
             obj_type = entity.objectType.split('::')[-1]
-            if obj_type == 'CombineFeature':
+            if obj_type in ('CombineFeature', 'RectangularPatternFeature', 'MoveFeature'):
                 try:
                     item.rollTo(True)
                 except Exception:
@@ -139,6 +148,18 @@ def run(_context: str):
                         "construction": arc.isConstruction
                     })
 
+                for s_idx, spl in enumerate(sketch.sketchCurves.sketchFittedSplines):
+                    pts = []
+                    for pi in range(spl.fitPoints.count):
+                        p = spl.fitPoints.item(pi).geometry
+                        pts.append({"x": p.x * 10, "y": p.y * 10})
+                    curves.append({
+                        "id": f"s{s_idx+1}",
+                        "type": "spline",
+                        "points": pts,
+                        "construction": spl.isConstruction
+                    })
+
                 profiles = []
                 for p_idx, prof in enumerate(sketch.profiles):
                     props = prof.areaProperties()
@@ -149,10 +170,22 @@ def run(_context: str):
                         "centroid": {"x": c.x * 10, "y": c.y * 10}
                     })
 
+                sketch_plane = plane_name
+                if sketch.parentComponent != root:
+                    for occ in root.occurrences:
+                        if occ.component == sketch.parentComponent:
+                            t = occ.transform.translation
+                            sketch_plane = {
+                                "origin": [t.x * 10, t.y * 10, t.z * 10],
+                                "x_dir": [1.0, 0.0, 0.0],
+                                "y_dir": [0.0, 1.0, 0.0]
+                            }
+                            break
+
                 step_data["sketch"] = {
                     "id": f"sketch_{idx+1}",
                     "name": item.name,
-                    "plane": plane_name,
+                    "plane": sketch_plane,
                     "curves": curves,
                     "profiles": profiles
                 }
@@ -194,8 +227,22 @@ def run(_context: str):
                 except Exception:
                     pass
 
+                participant_bodies = []
+                try:
+                    item.rollTo(True)
+                    if hasattr(ext, 'participantBodies') and ext.participantBodies:
+                        for b in ext.participantBodies:
+                            participant_bodies.append(b.name)
+                    item.rollTo(False)
+                except Exception:
+                    try:
+                        item.rollTo(False)
+                    except Exception:
+                        pass
+
                 sketch_name = ""
                 centroids = []
+                profile_infos = []
                 try:
                     prof = ext.profile
                     if hasattr(prof, 'parentSketch') and prof.parentSketch:
@@ -205,25 +252,101 @@ def run(_context: str):
                         if hasattr(p0, 'parentSketch') and p0.parentSketch:
                             sketch_name = p0.parentSketch.name
 
+                    p_list = []
                     if hasattr(prof, '__iter__'):
-                        for p in prof:
-                            if hasattr(p, 'areaProperties'):
-                                c = p.areaProperties().centroid
-                                centroids.append({"x": c.x * 10, "y": c.y * 10})
-                    elif hasattr(prof, 'areaProperties'):
-                        c = prof.areaProperties().centroid
-                        centroids.append({"x": c.x * 10, "y": c.y * 10})
+                        p_list = list(prof)
                     elif hasattr(prof, 'count'):
-                        for i in range(prof.count):
-                            p = prof.item(i)
-                            if hasattr(p, 'areaProperties'):
-                                c = p.areaProperties().centroid
-                                centroids.append({"x": c.x * 10, "y": c.y * 10})
+                        p_list = [prof.item(i) for i in range(prof.count)]
+                    elif hasattr(prof, 'areaProperties'):
+                        p_list = [prof]
+
+                    for pi, p in enumerate(p_list):
+                        if hasattr(p, 'areaProperties'):
+                            props = p.areaProperties()
+                            c = props.centroid
+                            c_dict = {"x": c.x * 10, "y": c.y * 10}
+                            centroids.append(c_dict)
+
+                            min_x, min_y = 1e9, 1e9
+                            max_x, max_y = -1e9, -1e9
+                            if hasattr(p, 'profileLoops'):
+                                for li in range(p.profileLoops.count):
+                                    loop = p.profileLoops.item(li)
+                                    if loop.isOuter:
+                                        for ci in range(loop.profileCurves.count):
+                                            pc = loop.profileCurves.item(ci)
+                                            pts = []
+                                            ent = getattr(pc, 'sketchEntity', None)
+                                            if ent:
+                                                if hasattr(ent, 'startSketchPoint') and ent.startSketchPoint:
+                                                    pts.append(ent.startSketchPoint.geometry)
+                                                if hasattr(ent, 'endSketchPoint') and ent.endSketchPoint:
+                                                    pts.append(ent.endSketchPoint.geometry)
+                                                if hasattr(ent, 'centerSketchPoint') and ent.centerSketchPoint:
+                                                    cp = ent.centerSketchPoint.geometry
+                                                    pts.append(cp)
+                                                    if hasattr(ent, 'radius'):
+                                                        r = ent.radius
+                                                        pts.append(adsk.core.Point3D.create(cp.x - r, cp.y - r, 0))
+                                                        pts.append(adsk.core.Point3D.create(cp.x + r, cp.y + r, 0))
+                                                if hasattr(ent, 'fitPoints'):
+                                                    for fpi in range(ent.fitPoints.count):
+                                                        pts.append(ent.fitPoints.item(fpi).geometry)
+                                            if not pts:
+                                                geom = pc.geometry
+                                                if hasattr(geom, 'startPoint'):
+                                                    pts.append(geom.startPoint)
+                                                if hasattr(geom, 'endPoint'):
+                                                    pts.append(geom.endPoint)
+                                                if hasattr(geom, 'evaluator'):
+                                                    ev = geom.evaluator
+                                                    p0 = ev.getParameterExtents()[1]
+                                                    p1 = ev.getParameterExtents()[2]
+                                                    pts.append(ev.getPointAtParameter((p0+p1)/2)[1])
+                                            for pt in pts:
+                                                min_x = min(min_x, pt.x * 10)
+                                                min_y = min(min_y, pt.y * 10)
+                                                max_x = max(max_x, pt.x * 10)
+                                                max_y = max(max_y, pt.y * 10)
+
+                            p_info = {
+                                "index": pi,
+                                "area_mm2": props.area * 100,
+                                "centroid": c_dict
+                            }
+                            if min_x < 1e8:
+                                p_info["bbox_min"] = {"x": min_x, "y": min_y}
+                                p_info["bbox_max"] = {"x": max_x, "y": max_y}
+                            profile_infos.append(p_info)
                 except Exception:
                     pass
 
                 face_target = None
                 if not centroids:
+                    try:
+                        item.rollTo(True)
+                        p_obj = ext.profile
+                        if p_obj:
+                            if hasattr(p_obj, 'objectType') and 'BRepFace' in p_obj.objectType:
+                                face = adsk.fusion.BRepFace.cast(p_obj)
+                                c = face.centroid
+                                face_target = {"x": c.x * 10, "y": c.y * 10, "z": c.z * 10}
+                            elif hasattr(p_obj, 'count'):
+                                for j in range(p_obj.count):
+                                    pj = p_obj.item(j)
+                                    if hasattr(pj, 'objectType') and 'BRepFace' in pj.objectType:
+                                        face = adsk.fusion.BRepFace.cast(pj)
+                                        c = face.centroid
+                                        face_target = {"x": c.x * 10, "y": c.y * 10, "z": c.z * 10}
+                                        break
+                        item.rollTo(False)
+                    except Exception:
+                        try:
+                            item.rollTo(False)
+                        except Exception:
+                            pass
+
+                if not centroids and not face_target:
                     try:
                         for f in ext.startFaces:
                             c = f.centroid
@@ -247,8 +370,10 @@ def run(_context: str):
                     "distance_mm": dist_val,
                     "operation": op_str,
                     "profile_centroids": centroids,
+                    "profiles": profile_infos,
                     "sketch_name": sketch_name,
                     "result_bodies": result_bodies,
+                    "participant_bodies": participant_bodies,
                     "face_target": face_target
                 }
 
@@ -315,7 +440,42 @@ def run(_context: str):
                 t = mf.transform.translation
                 body_names = []
                 try:
-                    body_names = [b.name for b in mf.bodies]
+                    if mf.inputEntities and mf.inputEntities.count > 0:
+                        for j in range(mf.inputEntities.count):
+                            ent = mf.inputEntities.item(j)
+                            if hasattr(ent, 'name'):
+                                body_names.append(ent.name)
+                    elif mf.bodies and mf.bodies.count > 0:
+                        body_names = [b.name for b in mf.bodies]
+                except Exception:
+                    pass
+
+                tform = mf.transform
+                r00 = tform.getCell(0, 0)
+                r01 = tform.getCell(0, 1)
+                r02 = tform.getCell(0, 2)
+                r10 = tform.getCell(1, 0)
+                r11 = tform.getCell(1, 1)
+                r12 = tform.getCell(1, 2)
+                r20 = tform.getCell(2, 0)
+                r21 = tform.getCell(2, 1)
+                r22 = tform.getCell(2, 2)
+
+                tr = r00 + r11 + r22
+                cos_theta = max(-1.0, min(1.0, (tr - 1.0) / 2.0))
+                theta = math.acos(cos_theta)
+                angle_deg = math.degrees(theta)
+                axis_vec = {"x": 0.0, "y": 0.0, "z": 1.0}
+                if abs(theta) > 1e-4:
+                    rx = r21 - r12
+                    ry = r02 - r20
+                    rz = r10 - r01
+                    l = math.sqrt(rx*rx + ry*ry + rz*rz)
+                    if l > 1e-6:
+                        axis_vec = {"x": rx/l, "y": ry/l, "z": rz/l}
+
+                try:
+                    item.rollTo(False)
                 except Exception:
                     pass
 
@@ -324,6 +484,8 @@ def run(_context: str):
                     "name": item.name,
                     "bodies": body_names,
                     "translation": {"x": t.x * 10, "y": t.y * 10, "z": t.z * 10},
+                    "rotation_axis": axis_vec,
+                    "angle_deg": angle_deg,
                     "copy": False,
                     "result_bodies": body_names
                 }
@@ -352,14 +514,6 @@ def run(_context: str):
                     "result_bodies": res_bodies
                 }
 
-                step_data["move"] = {
-                    "id": f"copy_{idx+1}",
-                    "name": item.name,
-                    "bodies": src_bodies,
-                    "translation": {"x": 0.0, "y": 0.0, "z": 0.0},
-                    "copy": True
-                }
-
             elif obj_type == 'MirrorFeature':
                 step_data["type"] = "mirror"
                 mf = adsk.fusion.MirrorFeature.cast(entity)
@@ -370,11 +524,26 @@ def run(_context: str):
                 except Exception:
                     pass
 
+                target_bodies = []
+                try:
+                    item.rollTo(True)
+                    if hasattr(mf, 'inputEntities') and mf.inputEntities:
+                        for j in range(mf.inputEntities.count):
+                            ent = mf.inputEntities.item(j)
+                            if hasattr(ent, 'name'):
+                                target_bodies.append(ent.name)
+                    item.rollTo(False)
+                except Exception:
+                    try:
+                        item.rollTo(False)
+                    except Exception:
+                        pass
+
                 step_data["mirror"] = {
                     "id": f"mirror_{idx+1}",
                     "name": item.name,
                     "plane": pname,
-                    "target_bodies": []
+                    "target_bodies": target_bodies
                 }
 
             elif obj_type == 'ConstructionPlane':
@@ -424,14 +593,89 @@ def run(_context: str):
                 }
 
             elif obj_type == 'RectangularPatternFeature':
-                step_data["type"] = "move"
-                step_data["move"] = {
+                step_data["type"] = "pattern"
+                feat = adsk.fusion.RectangularPatternFeature.cast(entity)
+                target_bodies = []
+                if feat and feat.inputEntities:
+                    for e_idx in range(feat.inputEntities.count):
+                        ent = feat.inputEntities.item(e_idx)
+                        if hasattr(ent, 'name'):
+                            target_bodies.append(ent.name)
+
+                q1 = int(round(feat.quantityOne.value)) if feat and feat.quantityOne else 1
+                d1_cm = feat.distanceOne.value if feat and feat.distanceOne else 0
+                d1_mm = d1_cm * 10.0
+
+                dir1_vec = [1.0, 0.0, 0.0]
+                if feat and feat.directionOneEntity and hasattr(feat.directionOneEntity, 'geometry'):
+                    geom = feat.directionOneEntity.geometry
+                    if hasattr(geom, 'startPoint') and hasattr(geom, 'endPoint'):
+                        vx = geom.endPoint.x - geom.startPoint.x
+                        vy = geom.endPoint.y - geom.startPoint.y
+                        vz = geom.endPoint.z - geom.startPoint.z
+                        l = (vx*vx + vy*vy + vz*vz)**0.5
+                        if l > 1e-6:
+                            dir1_vec = [vx/l, vy/l, vz/l]
+
+                if feat and feat.patternDistanceType == 0 and q1 > 1:
+                    step_spacing = d1_mm / (q1 - 1)
+                else:
+                    step_spacing = d1_mm
+
+                if step_spacing < 0:
+                    dir1_vec = [-dir1_vec[0], -dir1_vec[1], -dir1_vec[2]]
+                    step_spacing = -step_spacing
+
+                try:
+                    item.rollTo(False)
+                except Exception:
+                    pass
+
+                res_bodies = [b.name for b in feat.bodies] if feat and feat.bodies else []
+
+                step_data["pattern"] = {
                     "id": f"pattern_{idx+1}",
                     "name": item.name,
-                    "bodies": [],
-                    "translation": {"x": 0, "y": 0, "z": 0},
-                    "copy": True
+                    "bodies": target_bodies,
+                    "dir1": {"x": dir1_vec[0], "y": dir1_vec[1], "z": dir1_vec[2]},
+                    "count1": q1,
+                    "spacing1": step_spacing,
+                    "result_bodies": res_bodies
                 }
+
+        try:
+            total_vol = 0.0
+            total_area = 0.0
+            min_pt = [1e9, 1e9, 1e9]
+            max_pt = [-1e9, -1e9, -1e9]
+            body_count = 0
+            all_b = list(root.bRepBodies)
+            for occ in root.occurrences:
+                try:
+                    all_b.extend(list(occ.bRepBodies))
+                except Exception:
+                    pass
+            for b in all_b:
+                if b.isValid:
+                    body_count += 1
+                    total_vol += b.volume * 1000.0
+                    total_area += b.area * 100.0
+                    bb = b.boundingBox
+                    min_pt[0] = min(min_pt[0], bb.minPoint.x * 10)
+                    min_pt[1] = min(min_pt[1], bb.minPoint.y * 10)
+                    min_pt[2] = min(min_pt[2], bb.minPoint.z * 10)
+                    max_pt[0] = max(max_pt[0], bb.maxPoint.x * 10)
+                    max_pt[1] = max(max_pt[1], bb.maxPoint.y * 10)
+                    max_pt[2] = max(max_pt[2], bb.maxPoint.z * 10)
+            if body_count > 0:
+                step_data["target_stats"] = {
+                    "volume_mm3": total_vol,
+                    "area_mm2": total_area,
+                    "bbox_min": {"x": min_pt[0], "y": min_pt[1], "z": min_pt[2]},
+                    "bbox_max": {"x": max_pt[0], "y": max_pt[1], "z": max_pt[2]}
+                }
+        except Exception:
+            pass
 
         model_data["timeline"].append(step_data)
 

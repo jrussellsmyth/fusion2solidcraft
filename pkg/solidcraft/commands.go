@@ -13,8 +13,8 @@ type BatchRequest struct {
 
 // SketchCreateParams parameters for sketch.create.
 type SketchCreateParams struct {
-	Name  string `json:"name,omitempty"`
-	Plane string `json:"plane"` // "XY", "XZ", "YZ", or named plane
+	Name  string      `json:"name,omitempty"`
+	Plane interface{} `json:"plane"` // "XY", "XZ", "YZ", or {"origin": [x,y,z], ...}
 }
 
 // SketchLineParams parameters for sketch.line.
@@ -36,6 +36,12 @@ type SketchArcCenterPointParams struct {
 	Start        []float64 `json:"start"`  // [sx, sy]
 	End          []float64 `json:"end"`    // [ex, ey] CCW from start
 	Construction bool      `json:"construction,omitempty"`
+}
+
+// SketchSplineFitPointParams parameters for sketch.spline.fit_point.
+type SketchSplineFitPointParams struct {
+	Points       [][]float64 `json:"points"`
+	Construction bool        `json:"construction,omitempty"`
 }
 
 // SolidExtrudeParams parameters for solid.extrude.
@@ -89,6 +95,17 @@ type SolidMoveParams struct {
 type SolidMirrorParams struct {
 	Bodies []string    `json:"bodies,omitempty"`
 	Plane  interface{} `json:"plane"` // "XY", "XZ", "YZ", or {"origin": [x,y,z], "normal": [x,y,z]}
+}
+
+// SolidPatternRectangularParams parameters for solid.pattern.rectangular.
+type SolidPatternRectangularParams struct {
+	Bodies   []string  `json:"bodies"`
+	Dir1     []float64 `json:"dir1"`
+	Count1   int       `json:"count1"`
+	Spacing1 float64   `json:"spacing1"`
+	Dir2     []float64 `json:"dir2,omitempty"`
+	Count2   int       `json:"count2,omitempty"`
+	Spacing2 float64   `json:"spacing2,omitempty"`
 }
 
 // AppearanceAssignParams parameters for appearance.assign.

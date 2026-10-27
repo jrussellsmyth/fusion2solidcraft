@@ -1,2 +1,6 @@
 .worktrees/
 bin/
+*.solidcraft
+*.solidcraft.bak
+.~*.lock
+model_ir.json

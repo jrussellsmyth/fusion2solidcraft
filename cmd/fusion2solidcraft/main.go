@@ -16,6 +16,8 @@ func main() {
 	inputPath := flag.String("input", "", "Load CAD-IR model from existing JSON file instead of extracting from Fusion")
 	inspectOnly := flag.Bool("inspect", false, "Inspect & lint model timeline without streaming to SolidCraft")
 	verify := flag.Bool("verify", true, "Verify intermediate B-Rep stats (volume, area, bbox)")
+	untilStep := flag.Int("until-step", -1, "Pause execution after reaching this step index (inclusive)")
+	findDivergence := flag.Bool("find-divergence", false, "Halt immediately at the first step where SolidCraft diverges from Fusion")
 	savePath := flag.String("save", "", "Path to save .solidcraft file")
 	jsonOut := flag.String("json-out", "", "Export CAD-IR JSON to this file")
 	flag.Parse()
@@ -111,7 +113,8 @@ func main() {
 	// 6. Compile and Execute Timeline
 	fmt.Println("Compiling and replaying timeline into SolidCraft...")
 	compiler := solidcraft.NewCompiler(scClient)
-	results, err := compiler.CompileModel(model, *verify)
+	doVerify := *verify || *findDivergence
+	results, err := compiler.CompileModel(model, doVerify, *untilStep, *findDivergence)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error during compilation: %v\n", err)
 		os.Exit(1)

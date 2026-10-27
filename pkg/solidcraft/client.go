@@ -231,14 +231,32 @@ func (c *Client) Measure() (*cadir.VerificationStats, error) {
 	}
 
 	if len(result.Bodies) > 0 {
-		b := result.Bodies[0]
-		if len(b.BBox.Min) == 3 && len(b.BBox.Max) == 3 {
-			stats.BBoxMin = cadir.Point3D{X: b.BBox.Min[0], Y: b.BBox.Min[1], Z: b.BBox.Min[2]}
-			stats.BBoxMax = cadir.Point3D{X: b.BBox.Max[0], Y: b.BBox.Max[1], Z: b.BBox.Max[2]}
+		minX, minY, minZ := 1e9, 1e9, 1e9
+		maxX, maxY, maxZ := -1e9, -1e9, -1e9
+		for _, b := range result.Bodies {
+			if len(b.BBox.Min) == 3 && len(b.BBox.Max) == 3 {
+				if b.BBox.Min[0] < minX {
+					minX = b.BBox.Min[0]
+				}
+				if b.BBox.Min[1] < minY {
+					minY = b.BBox.Min[1]
+				}
+				if b.BBox.Min[2] < minZ {
+					minZ = b.BBox.Min[2]
+				}
+				if b.BBox.Max[0] > maxX {
+					maxX = b.BBox.Max[0]
+				}
+				if b.BBox.Max[1] > maxY {
+					maxY = b.BBox.Max[1]
+				}
+				if b.BBox.Max[2] > maxZ {
+					maxZ = b.BBox.Max[2]
+				}
+			}
 		}
-		if len(b.CenterOfMass) == 3 {
-			stats.Centroid = cadir.Point3D{X: b.CenterOfMass[0], Y: b.CenterOfMass[1], Z: b.CenterOfMass[2]}
-		}
+		stats.BBoxMin = cadir.Point3D{X: minX, Y: minY, Z: minZ}
+		stats.BBoxMax = cadir.Point3D{X: maxX, Y: maxY, Z: maxZ}
 	}
 
 	return stats, nil

@@ -32,6 +32,7 @@ type Curve struct {
 	Center       Point2D   `json:"center,omitempty"`
 	Radius       float64   `json:"radius,omitempty"`
 	MidPoint     Point2D   `json:"mid_point,omitempty"`
+	Points       []Point2D `json:"points,omitempty"`
 	Construction bool      `json:"construction,omitempty"`
 }
 
@@ -46,11 +47,11 @@ type Profile struct {
 
 // Sketch represents a planar 2D sketch feature.
 type Sketch struct {
-	ID       string    `json:"id"`
-	Name     string    `json:"name"`
-	Plane    string    `json:"plane"` // "XY", "XZ", "YZ", or named/face reference
-	Curves   []Curve   `json:"curves"`
-	Profiles []Profile `json:"profiles"`
+	ID       string      `json:"id"`
+	Name     string      `json:"name"`
+	Plane    interface{} `json:"plane"` // "XY", "XZ", "YZ", or {"origin": [x,y,z], ...}
+	Curves   []Curve     `json:"curves"`
+	Profiles []Profile   `json:"profiles"`
 }
 
 // BooleanOp defines solid combination operations.
@@ -63,17 +64,28 @@ const (
 	OpIntersect BooleanOp = "intersect"
 )
 
+// ExtrudeProfileInfo describes a profile region used by an extrusion.
+type ExtrudeProfileInfo struct {
+	Index    int      `json:"index,omitempty"`
+	AreaMM2  float64  `json:"area_mm2,omitempty"`
+	Centroid Point2D  `json:"centroid"`
+	BBoxMin  *Point2D `json:"bbox_min,omitempty"`
+	BBoxMax  *Point2D `json:"bbox_max,omitempty"`
+}
+
 // ExtrudeFeature represents a 3D linear extrusion.
 type ExtrudeFeature struct {
-	ID               string    `json:"id"`
-	Name             string    `json:"name"`
-	DistanceMM       float64   `json:"distance_mm"`
-	Operation        BooleanOp `json:"operation"`
-	ProfileCentroids []Point2D `json:"profile_centroids"`
-	TaperAngleDeg    float64   `json:"taper_angle_deg,omitempty"`
-	SketchName       string    `json:"sketch_name,omitempty"`
-	ResultBodies     []string  `json:"result_bodies,omitempty"`
-	FaceTarget       *Point3D  `json:"face_target,omitempty"`
+	ID                string               `json:"id"`
+	Name              string               `json:"name"`
+	DistanceMM        float64              `json:"distance_mm"`
+	Operation         BooleanOp            `json:"operation"`
+	ProfileCentroids  []Point2D            `json:"profile_centroids"`
+	Profiles          []ExtrudeProfileInfo `json:"profiles,omitempty"`
+	TaperAngleDeg     float64              `json:"taper_angle_deg,omitempty"`
+	SketchName        string               `json:"sketch_name,omitempty"`
+	ResultBodies      []string             `json:"result_bodies,omitempty"`
+	ParticipantBodies []string             `json:"participant_bodies,omitempty"`
+	FaceTarget        *Point3D             `json:"face_target,omitempty"`
 }
 
 // FilletFeature represents edge rounding.
@@ -121,6 +133,20 @@ type MirrorFeature struct {
 	Name         string   `json:"name"`
 	Plane        string   `json:"plane"`
 	TargetBodies []string `json:"target_bodies"`
+}
+
+// PatternFeature represents rectangular or circular patterning of bodies.
+type PatternFeature struct {
+	ID           string   `json:"id"`
+	Name         string   `json:"name"`
+	Bodies       []string `json:"bodies"`
+	Dir1         Point3D  `json:"dir1"`
+	Count1       int      `json:"count1"`
+	Spacing1     float64  `json:"spacing1"`
+	Dir2         *Point3D `json:"dir2,omitempty"`
+	Count2       int      `json:"count2,omitempty"`
+	Spacing2     float64  `json:"spacing2,omitempty"`
+	ResultBodies []string `json:"result_bodies,omitempty"`
 }
 
 // ThreadFeature represents modeled or cosmetic threads on cylindrical faces.
@@ -176,6 +202,7 @@ type TimelineStep struct {
 	Combine     *CombineFeature    `json:"combine,omitempty"`
 	Move        *MoveFeature       `json:"move,omitempty"`
 	Mirror      *MirrorFeature     `json:"mirror,omitempty"`
+	Pattern     *PatternFeature    `json:"pattern,omitempty"`
 	Thread      *ThreadFeature     `json:"thread,omitempty"`
 	Plane       *ConstructionPlane `json:"plane,omitempty"`
 	Occurrence  *Occurrence        `json:"occurrence,omitempty"`
