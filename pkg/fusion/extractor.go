@@ -108,15 +108,32 @@ def run(_context: str):
                         plane_name = "XY"
                 
                 curves = []
+                handle_segs = []
+                for s_idx in range(sketch.sketchCurves.sketchFittedSplines.count):
+                    spl = sketch.sketchCurves.sketchFittedSplines.item(s_idx)
+                    for pi in range(spl.fitPoints.count):
+                        try:
+                            fp = spl.fitPoints.item(pi)
+                            th = spl.getTangentHandle(fp)
+                            if th and th.startSketchPoint and th.endSketchPoint:
+                                ts = th.startSketchPoint.geometry
+                                te = th.endSketchPoint.geometry
+                                handle_segs.append(((round(ts.x * 10, 3), round(ts.y * 10, 3)), (round(te.x * 10, 3), round(te.y * 10, 3))))
+                        except Exception:
+                            pass
+
                 for l_idx, line in enumerate(sketch.sketchCurves.sketchLines):
                     sp = line.startSketchPoint.geometry
                     ep = line.endSketchPoint.geometry
+                    s_pt = (round(sp.x * 10, 3), round(sp.y * 10, 3))
+                    e_pt = (round(ep.x * 10, 3), round(ep.y * 10, 3))
+                    is_handle = ((s_pt, e_pt) in handle_segs) or ((e_pt, s_pt) in handle_segs)
                     curves.append({
                         "id": f"l{l_idx+1}",
                         "type": "line",
                         "start": {"x": sp.x * 10, "y": sp.y * 10},
                         "end": {"x": ep.x * 10, "y": ep.y * 10},
-                        "construction": line.isConstruction
+                        "construction": bool(line.isConstruction or is_handle)
                     })
 
                 for c_idx, circle in enumerate(sketch.sketchCurves.sketchCircles):
@@ -148,17 +165,111 @@ def run(_context: str):
                         "construction": arc.isConstruction
                     })
 
-                for s_idx, spl in enumerate(sketch.sketchCurves.sketchFittedSplines):
-                    pts = []
-                    for pi in range(spl.fitPoints.count):
-                        p = spl.fitPoints.item(pi).geometry
-                        pts.append({"x": p.x * 10, "y": p.y * 10})
-                    curves.append({
-                        "id": f"s{s_idx+1}",
-                        "type": "spline",
-                        "points": pts,
-                        "construction": spl.isConstruction
-                    })
+                def _is_uniform_clamped(deg, knots):
+                    if len(knots) < 2 * (deg + 1):
+                        return False
+                    k0, k1 = knots[0], knots[-1]
+                    if abs(k1 - k0) < 1e-9:
+                        return False
+                    for ki in range(deg + 1):
+                        if abs(knots[ki] - k0) > 1e-6 or abs(knots[-(ki+1)] - k1) > 1e-6:
+                            return False
+                    n_spans = len(knots) - 2 * deg - 1
+                    for kj in range(1, n_spans):
+                        expected = k0 + (k1 - k0) * (kj / float(n_spans))
+                        if abs(knots[deg + kj] - expected) > 1e-5 * (k1 - k0):
+                            return False
+                    return True
+
+                def _is_piecewise_bezier3(deg, knots, cp_count):
+                    if deg != 3 or cp_count < 4 or (cp_count - 1) %% 3 != 0:
+                        return False
+                    n_segs = (cp_count - 1) // 3
+                    if len(knots) != 4 + 3 * (n_segs - 1) + 4:
+                        return False
+                    if abs(knots[0] - knots[3]) > 1e-6 or abs(knots[-1] - knots[-4]) > 1e-6:
+                        return False
+                    for s_seg in range(1, n_segs):
+                        k_idx = 4 + 3 * (s_seg - 1)
+                        if abs(knots[k_idx] - knots[k_idx+2]) > 1e-6:
+                            return False
+                    return True
+
+                all_splines = []
+                for s_i in range(sketch.sketchCurves.sketchFittedSplines.count):
+                    all_splines.append(('fitted', sketch.sketchCurves.sketchFittedSplines.item(s_i)))
+                if hasattr(sketch.sketchCurves, 'sketchFixedSplines'):
+                    for s_i in range(sketch.sketchCurves.sketchFixedSplines.count):
+                        all_splines.append(('fixed', sketch.sketchCurves.sketchFixedSplines.item(s_i)))
+                if hasattr(sketch.sketchCurves, 'sketchControlPointSplines'):
+                    for s_i in range(sketch.sketchCurves.sketchControlPointSplines.count):
+                        all_splines.append(('cp', sketch.sketchCurves.sketchControlPointSplines.item(s_i)))
+
+                seen_spline_sigs = set()
+                s_counter = 0
+                for s_kind, spl in all_splines:
+                    geom = spl.geometry
+                    nurbs = geom.asNurbsCurve if hasattr(geom, 'asNurbsCurve') else geom
+                    deg = nurbs.degree
+                    knots = list(nurbs.knots)
+                    cps = [{"x": p.x * 10, "y": p.y * 10} for p in nurbs.controlPoints]
+                    ev = geom.evaluator
+                    _, p0, p1 = ev.getParameterExtents()
+                    _, pt_start = ev.getPointAtParameter(p0)
+                    _, pt_mid = ev.getPointAtParameter((p0 + p1) * 0.5)
+                    _, pt_end = ev.getPointAtParameter(p1)
+                    ep1 = (round(pt_start.x * 10, 2), round(pt_start.y * 10, 2))
+                    ep2 = (round(pt_end.x * 10, 2), round(pt_end.y * 10, 2))
+                    mp = (round(pt_mid.x * 10, 2), round(pt_mid.y * 10, 2))
+                    sig = (min(ep1, ep2), max(ep1, ep2), mp, bool(spl.isConstruction))
+                    if sig in seen_spline_sigs:
+                        continue
+                    seen_spline_sigs.add(sig)
+
+                    if deg in (3, 5) and _is_uniform_clamped(deg, knots):
+                        s_counter += 1
+                        pts = []
+                        if s_kind == 'fitted':
+                            for pi in range(spl.fitPoints.count):
+                                p = spl.fitPoints.item(pi).geometry
+                                pts.append({"x": p.x * 10, "y": p.y * 10})
+                        else:
+                            pts = [cps[0], cps[-1]]
+                        curves.append({
+                            "id": f"s{s_counter}",
+                            "type": "spline",
+                            "degree": deg,
+                            "control_points": cps,
+                            "points": pts,
+                            "construction": bool(spl.isConstruction)
+                        })
+                    elif _is_piecewise_bezier3(deg, knots, len(cps)):
+                        n_segs = (len(cps) - 1) // 3
+                        for seg in range(n_segs):
+                            seg_cps = cps[3*seg : 3*seg + 4]
+                            s_counter += 1
+                            curves.append({
+                                "id": f"s{s_counter}",
+                                "type": "spline",
+                                "degree": 3,
+                                "control_points": seg_cps,
+                                "points": [seg_cps[0], seg_cps[-1]],
+                                "construction": bool(spl.isConstruction)
+                            })
+                    else:
+                        n_samples = max(12, len(cps) * 2)
+                        sampled = []
+                        for si in range(n_samples):
+                            t = p0 + (p1 - p0) * (si / float(n_samples - 1))
+                            _, pt = ev.getPointAtParameter(t)
+                            sampled.append({"x": pt.x * 10, "y": pt.y * 10})
+                        s_counter += 1
+                        curves.append({
+                            "id": f"s{s_counter}",
+                            "type": "spline",
+                            "points": sampled,
+                            "construction": bool(spl.isConstruction)
+                        })
 
                 profiles = []
                 for p_idx, prof in enumerate(sketch.profiles):
@@ -171,16 +282,33 @@ def run(_context: str):
                     })
 
                 sketch_plane = plane_name
-                if sketch.parentComponent != root:
-                    for occ in root.occurrences:
-                        if occ.component == sketch.parentComponent:
-                            t = occ.transform.translation
-                            sketch_plane = {
-                                "origin": [t.x * 10, t.y * 10, t.z * 10],
-                                "x_dir": [1.0, 0.0, 0.0],
-                                "y_dir": [0.0, 1.0, 0.0]
-                            }
-                            break
+                try:
+                    o = sketch.origin
+                    xd = sketch.xDirection
+                    yd = sketch.yDirection
+                    zd = xd.crossProduct(yd)
+                    zd.normalize()
+                    ox, oy, oz = o.x * 10, o.y * 10, o.z * 10
+                    if sketch.parentComponent != root:
+                        for occ in root.occurrences:
+                            if occ.component == sketch.parentComponent:
+                                t = occ.transform.translation
+                                ox += t.x * 10
+                                oy += t.y * 10
+                                oz += t.z * 10
+                                break
+                    is_std_xy = (
+                        abs(ox) < 1e-4 and abs(oy) < 1e-4 and abs(oz) < 1e-4 and
+                        abs(xd.x - 1.0) < 1e-4 and abs(yd.y - 1.0) < 1e-4 and abs(zd.z - 1.0) < 1e-4
+                    )
+                    if not is_std_xy:
+                        sketch_plane = {
+                            "origin": [round(ox, 6), round(oy, 6), round(oz, 6)],
+                            "x_dir": [round(xd.x, 6), round(xd.y, 6), round(xd.z, 6)],
+                            "y_dir": [round(yd.x, 6), round(yd.y, 6), round(yd.z, 6)]
+                        }
+                except Exception:
+                    pass
 
                 step_data["sketch"] = {
                     "id": f"sketch_{idx+1}",
@@ -197,27 +325,62 @@ def run(_context: str):
                 op_map = {0: "join", 1: "cut", 2: "intersect", 3: "new"}
                 op_str = op_map.get(ext.operation, "new")
                 
+                sk_ref = None
+                try:
+                    prof = ext.profile
+                    if hasattr(prof, 'parentSketch') and prof.parentSketch:
+                        sk_ref = prof.parentSketch
+                    elif hasattr(prof, 'count') and prof.count > 0:
+                        p0 = prof.item(0)
+                        if hasattr(p0, 'parentSketch') and p0.parentSketch:
+                            sk_ref = p0.parentSketch
+                except Exception:
+                    pass
+
+                sk_origin = adsk.core.Point3D.create(0, 0, 0)
+                sk_normal = adsk.core.Vector3D.create(0, 0, 1)
+                if sk_ref:
+                    sk_origin = sk_ref.origin
+                    sk_normal = sk_ref.xDirection.crossProduct(sk_ref.yDirection)
+                    sk_normal.normalize()
+                    if sk_ref.parentComponent != root:
+                        for occ in root.occurrences:
+                            if occ.component == sk_ref.parentComponent:
+                                t = occ.transform.translation
+                                sk_origin = adsk.core.Point3D.create(sk_origin.x + t.x, sk_origin.y + t.y, sk_origin.z + t.z)
+                                break
+
+                def _proj_along_normal(pt):
+                    v = adsk.core.Vector3D.create(pt.x - sk_origin.x, pt.y - sk_origin.y, pt.z - sk_origin.z)
+                    return v.dotProduct(sk_normal) * 10.0
+
                 dist_val = 0.0
                 start_offset = 0.0
                 if hasattr(ext, 'startExtent') and ext.startExtent:
                     se = ext.startExtent
                     try:
-                        if hasattr(se, 'entity') and hasattr(se.entity, 'centroid'):
-                            start_offset = se.entity.centroid.z * 10
-                        elif hasattr(se, 'offset') and se.offset:
-                            start_offset = se.offset.value * 10
+                        if hasattr(se, 'entity') and se.entity:
+                            se_ent = se.entity
+                            if hasattr(se_ent, 'centroid'):
+                                start_offset = _proj_along_normal(se_ent.centroid)
+                            elif hasattr(se_ent, 'geometry') and hasattr(se_ent.geometry, 'origin'):
+                                start_offset = _proj_along_normal(se_ent.geometry.origin)
+                        if hasattr(se, 'offset') and se.offset:
+                            start_offset += se.offset.value * 10.0
                     except Exception:
                         pass
                 if ext.extentOne:
                     if hasattr(ext.extentOne, 'distance') and ext.extentOne.distance:
-                        dist_val = ext.extentOne.distance.value * 10
-                    elif hasattr(ext.extentOne, 'entity'):
+                        dist_val = ext.extentOne.distance.value * 10.0
+                    elif hasattr(ext.extentOne, 'entity') and ext.extentOne.entity:
                         try:
                             to_ent = ext.extentOne.entity
-                            if hasattr(to_ent, 'geometry') and hasattr(to_ent.geometry, 'origin'):
-                                dist_val = to_ent.geometry.origin.z * 10
-                            elif hasattr(to_ent, 'centroid'):
-                                dist_val = to_ent.centroid.z * 10
+                            end_pos = 0.0
+                            if hasattr(to_ent, 'centroid'):
+                                end_pos = _proj_along_normal(to_ent.centroid)
+                            elif hasattr(to_ent, 'geometry') and hasattr(to_ent.geometry, 'origin'):
+                                end_pos = _proj_along_normal(to_ent.geometry.origin)
+                            dist_val = end_pos - start_offset
                         except Exception:
                             pass
                 if abs(dist_val) < 0.001 and ext.faces and ext.faces.count > 0:

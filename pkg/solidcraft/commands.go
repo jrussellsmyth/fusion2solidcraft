@@ -44,6 +44,12 @@ type SketchSplineFitPointParams struct {
 	Construction bool        `json:"construction,omitempty"`
 }
 
+// SketchSplineControlPointParams parameters for sketch.spline.control_point and sketch.spline.control_point_5.
+type SketchSplineControlPointParams struct {
+	Points       [][]float64 `json:"points"`
+	Construction bool        `json:"construction,omitempty"`
+}
+
 // SolidExtrudeParams parameters for solid.extrude.
 type SolidExtrudeParams struct {
 	Name        string      `json:"name,omitempty"`

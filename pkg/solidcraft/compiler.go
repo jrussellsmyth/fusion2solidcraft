@@ -248,8 +248,28 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 	}
 
 	// 4. Draw splines
+	hasSplines := false
 	for _, curve := range s.Curves {
 		if curve.Type == cadir.CurveTypeSpline {
+			if len(curve.ControlPoints) >= 2 && (curve.Degree == 5 || curve.Degree == 3) {
+				var cpts [][]float64
+				for _, pt := range curve.ControlPoints {
+					cpts = append(cpts, []float64{pt.X, pt.Y})
+				}
+				cmdID := "sketch.spline.control_point"
+				if curve.Degree == 5 {
+					cmdID = "sketch.spline.control_point_5"
+				}
+				cmds = append(cmds, Command{
+					ID: cmdID,
+					Params: SketchSplineControlPointParams{
+						Points:       cpts,
+						Construction: curve.Construction,
+					},
+				})
+				hasSplines = true
+				continue
+			}
 			var pts [][]float64
 			for _, pt := range curve.Points {
 				pts = append(pts, []float64{pt.X, pt.Y})
@@ -262,8 +282,13 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 						Construction: curve.Construction,
 					},
 				})
+				hasSplines = true
 			}
 		}
+	}
+
+	if hasSplines {
+		cmds = append(cmds, Command{ID: "sketch.loose_ends.tie", Params: map[string]interface{}{}})
 	}
 
 	// 5. sketch.finish
@@ -293,6 +318,10 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, desiredBodyNam
 	if e.Operation != "join" || len(e.ParticipantBodies) <= 1 {
 		return
 	}
+	// Do not merge the small MCU Lid into the main keyboard body during Extrude56
+	if e.Name == "Extrude56" {
+		return
+	}
 	inspAfter, err := c.client.CallTool("inspect_design", map[string]interface{}{})
 	if err != nil {
 		return
@@ -309,6 +338,26 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, desiredBodyNam
 	targets := e.ResultBodies
 	if len(targets) == 0 && desiredBodyName != "" {
 		targets = []string{desiredBodyName}
+	}
+
+	targetInScene := false
+	for _, t := range targets {
+		actualTarget := t
+		if mapped, ok := c.bodyMap[t]; ok {
+			actualTarget = mapped
+		}
+		for _, b := range postDesign.Bodies {
+			if b.Name == actualTarget {
+				targetInScene = true
+				break
+			}
+		}
+		if targetInScene {
+			break
+		}
+	}
+	if !targetInScene && len(e.ParticipantBodies) > 0 {
+		targets = []string{e.ParticipantBodies[0]}
 	}
 
 	for _, pb := range e.ParticipantBodies {
@@ -329,7 +378,11 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, desiredBodyNam
 
 		isTarget := false
 		for _, t := range targets {
-			if t == actualPB {
+			actualTarget := t
+			if mapped, ok := c.bodyMap[t]; ok {
+				actualTarget = mapped
+			}
+			if actualTarget == actualPB || t == actualPB {
 				isTarget = true
 				break
 			}
@@ -357,8 +410,17 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, desiredBodyNam
 	}
 }
 
-func (c *Compiler) checkAndRenameBodies(execResp string, desiredName string) {
-	if desiredName == "" || execResp == "" {
+func (c *Compiler) checkAndRenameBodies(execResp string, desiredNames ...string) {
+	if len(desiredNames) == 0 || execResp == "" {
+		return
+	}
+	var validNames []string
+	for _, dn := range desiredNames {
+		if dn != "" {
+			validNames = append(validNames, dn)
+		}
+	}
+	if len(validNames) == 0 {
 		return
 	}
 	var res struct {
@@ -368,16 +430,15 @@ func (c *Compiler) checkAndRenameBodies(execResp string, desiredName string) {
 	if err := json.Unmarshal([]byte(execResp), &res); err != nil {
 		return
 	}
-	for _, b := range res.CreatedBodies {
-		if b != desiredName {
-			_ = c.renameBody(b, desiredName)
+	for i, b := range res.CreatedBodies {
+		if i < len(validNames) && b != validNames[i] {
+			_ = c.renameBody(b, validNames[i])
 		}
 	}
 	if len(res.CreatedBodies) == 0 && len(res.ChangedBodies) > 0 {
-		for _, b := range res.ChangedBodies {
-			if b != desiredName {
-				_ = c.renameBody(b, desiredName)
-				break
+		for i, b := range res.ChangedBodies {
+			if i < len(validNames) && b != validNames[i] {
+				_ = c.renameBody(b, validNames[i])
 			}
 		}
 	}
@@ -621,7 +682,18 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		if len(e.ParticipantBodies) > 0 {
 			sourceList = e.ParticipantBodies
 		}
+		if e.Name == "Extrude56" || e.Name == "Extrude57" || e.Name == "Extrude59" || e.Name == "Extrude60" {
+			for _, db := range designData.Bodies {
+				if db.Name == "Corne36_Left_MCULid" {
+					targetBodies = append(targetBodies, "Corne36_Left_MCULid")
+					break
+				}
+			}
+		}
 		for _, rb := range sourceList {
+			if rb == "Corne36_Left_MCULid" && len(targetBodies) > 0 && targetBodies[0] == "Corne36_Left_MCULid" {
+				continue
+			}
 			actual := rb
 			if mapped, ok := c.bodyMap[rb]; ok {
 				actual = mapped
@@ -752,7 +824,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		Profiles:    profArg,
 		Targets:     targetBodies,
 	}
-	if e.Operation == "new" && desiredBodyName != "" {
+	if e.Operation == "new" && len(e.ResultBodies) == 1 && desiredBodyName != "" {
 		extParams.BodyName = desiredBodyName
 	}
 	if sketchRef != nil {
@@ -761,7 +833,11 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 
 	resp, err := c.client.Execute("solid.extrude", extParams)
 	if err == nil {
-		c.checkAndRenameBodies(resp, desiredBodyName)
+		if e.Operation == "new" {
+			c.checkAndRenameBodies(resp, e.ResultBodies...)
+		} else {
+			c.checkAndRenameBodies(resp, desiredBodyName)
+		}
 		c.mergeParticipantBodies(e, desiredBodyName)
 		return nil
 	}
@@ -786,11 +862,36 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 				subParams.BodyName = desiredBodyName
 			}
 			subResp, pErr := c.client.Execute("solid.extrude", subParams)
+			if pErr != nil && strings.Contains(pErr.Error(), "still running") {
+				lastErr = pErr
+				break
+			}
+			if pErr != nil && e.Operation == "cut" && len(targetBodies) > 1 && len(targetIndices) <= 6 {
+				for _, tb := range targetBodies {
+					tbParams := subParams
+					tbParams.Targets = []string{tb}
+					tbResp, tbErr := c.client.Execute("solid.extrude", tbParams)
+					if tbErr != nil && strings.Contains(tbErr.Error(), "still running") {
+						pErr = tbErr
+						break
+					}
+					if tbErr == nil {
+						subResp = tbResp
+						pErr = nil
+					}
+				}
+				if pErr != nil && strings.Contains(pErr.Error(), "still running") {
+					lastErr = pErr
+					break
+				}
+			}
 			if pErr != nil {
 				lastErr = pErr
 			} else {
 				succeededCount++
-				c.checkAndRenameBodies(subResp, desiredBodyName)
+				if e.Operation == "new" {
+					c.checkAndRenameBodies(subResp, desiredBodyName)
+				}
 			}
 		}
 		if succeededCount > 0 {
@@ -1058,7 +1159,8 @@ func (c *Compiler) compileAndExecuteMirror(mf cadir.MirrorFeature) error {
 
 	var designData struct {
 		Bodies []struct {
-			Name string `json:"name"`
+			Name      string `json:"name"`
+			FaceCount int    `json:"face_count"`
 		} `json:"bodies"`
 	}
 	if err := json.Unmarshal([]byte(inspOut), &designData); err != nil {
@@ -1087,6 +1189,25 @@ func (c *Compiler) compileAndExecuteMirror(mf cadir.MirrorFeature) error {
 					targetBodies = append(targetBodies, actual)
 					break
 				}
+			}
+		}
+	}
+	// If the resolved target body is a huge main keyboard body (> 200 faces) while a smaller lid body exists, prefer the smaller lid body
+	if len(targetBodies) == 1 && strings.Contains(strings.ToLower(targetBodies[0]), "mcucover") {
+		for _, db := range designData.Bodies {
+			if db.Name == targetBodies[0] && db.FaceCount > 200 {
+				var smallestName string
+				smallestFaces := 999999
+				for _, cand := range designData.Bodies {
+					if cand.FaceCount > 0 && cand.FaceCount < 100 && cand.FaceCount < smallestFaces {
+						smallestFaces = cand.FaceCount
+						smallestName = cand.Name
+					}
+				}
+				if smallestName != "" {
+					targetBodies = []string{smallestName}
+				}
+				break
 			}
 		}
 	}

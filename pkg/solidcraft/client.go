@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os/exec"
+	"strings"
 	"sync"
 
 	"github.com/jrussell/fusion2solidcraft/pkg/cadir"
@@ -173,6 +174,31 @@ func (c *Client) CallTool(name string, args map[string]interface{}) (string, err
 
 	text := content.Content[0].Text
 	if content.IsError {
+		if strings.Contains(text, "still running:") {
+			for attempt := 0; attempt < 2; attempt++ {
+				pReq := mcpRequest{
+					JSONRPC: "2.0",
+					ID:      c.reqID,
+					Method:  "tools/call",
+					Params: map[string]interface{}{
+						"name":      "pending",
+						"arguments": map[string]interface{}{},
+					},
+				}
+				c.reqID++
+				if wErr := c.write(pReq); wErr == nil {
+					if pResp, rErr := c.read(); rErr == nil {
+						var pContent toolCallContent
+						if json.Unmarshal(pResp.Result, &pContent) == nil && len(pContent.Content) > 0 {
+							pText := pContent.Content[0].Text
+							if !strings.Contains(pText, `"done":false`) && !strings.Contains(pText, `"done": false`) {
+								break
+							}
+						}
+					}
+				}
+			}
+		}
 		return "", fmt.Errorf("tool error: %s", text)
 	}
 

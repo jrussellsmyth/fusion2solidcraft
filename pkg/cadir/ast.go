@@ -25,15 +25,17 @@ const (
 
 // Curve represents a 2D sketch curve.
 type Curve struct {
-	ID           string    `json:"id"`
-	Type         CurveType `json:"type"`
-	Start        Point2D   `json:"start,omitempty"`
-	End          Point2D   `json:"end,omitempty"`
-	Center       Point2D   `json:"center,omitempty"`
-	Radius       float64   `json:"radius,omitempty"`
-	MidPoint     Point2D   `json:"mid_point,omitempty"`
-	Points       []Point2D `json:"points,omitempty"`
-	Construction bool      `json:"construction,omitempty"`
+	ID            string    `json:"id"`
+	Type          CurveType `json:"type"`
+	Start         Point2D   `json:"start,omitempty"`
+	End           Point2D   `json:"end,omitempty"`
+	Center        Point2D   `json:"center,omitempty"`
+	Radius        float64   `json:"radius,omitempty"`
+	MidPoint      Point2D   `json:"mid_point,omitempty"`
+	Points        []Point2D `json:"points,omitempty"`
+	Degree        int       `json:"degree,omitempty"`
+	ControlPoints []Point2D `json:"control_points,omitempty"`
+	Construction  bool      `json:"construction,omitempty"`
 }
 
 // Profile represents a closed 2D planar region within a sketch.
