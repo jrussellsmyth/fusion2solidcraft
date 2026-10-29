@@ -89,14 +89,21 @@ type ExtrudeFeature struct {
 	ResultBodies      []string             `json:"result_bodies,omitempty"`
 	ParticipantBodies []string             `json:"participant_bodies,omitempty"`
 	FaceTarget        *Point3D             `json:"face_target,omitempty"`
+	FaceNormal        *Point3D             `json:"face_normal,omitempty"`
+	FaceAreaMM2       float64              `json:"face_area_mm2,omitempty"`
+	FaceBBoxMin       *Point3D             `json:"face_bbox_min,omitempty"`
+	FaceBBoxMax       *Point3D             `json:"face_bbox_max,omitempty"`
+	ToTarget          *Point3D             `json:"to_target,omitempty"`
+	ToOffsetMM        float64              `json:"to_offset_mm,omitempty"`
 }
 
 // FilletFeature represents edge rounding.
 type FilletFeature struct {
-	ID          string    `json:"id"`
-	Name        string    `json:"name"`
-	RadiusMM    float64   `json:"radius_mm"`
-	TargetEdges []Point3D `json:"target_edges"`
+	ID           string    `json:"id"`
+	Name         string    `json:"name"`
+	RadiusMM     float64   `json:"radius_mm"`
+	TargetEdges  []Point3D `json:"target_edges"`
+	TargetBodies []string  `json:"target_bodies,omitempty"`
 }
 
 // ChamferFeature represents edge beveling.
@@ -136,6 +143,7 @@ type MirrorFeature struct {
 	Name         string   `json:"name"`
 	Plane        string   `json:"plane"`
 	TargetBodies []string `json:"target_bodies"`
+	ResultBodies []string `json:"result_bodies,omitempty"`
 }
 
 // PatternFeature represents rectangular or circular patterning of bodies.

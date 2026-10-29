@@ -16,11 +16,25 @@ func main() {
 	inputPath := flag.String("input", "", "Load CAD-IR model from existing JSON file instead of extracting from Fusion")
 	inspectOnly := flag.Bool("inspect", false, "Inspect & lint model timeline without streaming to SolidCraft")
 	verify := flag.Bool("verify", true, "Verify intermediate B-Rep stats (volume, area, bbox)")
+	startStep := flag.Int("start-step", 0, "Start execution at this step index (inclusive; >0 resumes existing SolidCraft session without reset)")
+	fromStep := flag.Int("from-step", 0, "Alias for -start-step")
 	untilStep := flag.Int("until-step", -1, "Pause execution after reaching this step index (inclusive)")
+	endStep := flag.Int("end-step", -1, "Alias for -until-step")
+	stepMode := flag.Bool("step", false, "Interactive step-by-step mode (prompts 'n' for next, 'c' to continue, 'q' to quit before each feature)")
+	stepFrom := flag.Int("step-from", -1, "Run automatically up to this step index, then start interactive stepping controls ('n'/'c'/'q')")
 	findDivergence := flag.Bool("find-divergence", false, "Halt immediately at the first step where SolidCraft diverges from Fusion")
 	savePath := flag.String("save", "", "Path to save .solidcraft file")
 	jsonOut := flag.String("json-out", "", "Export CAD-IR JSON to this file")
 	flag.Parse()
+
+	effectiveStart := *startStep
+	if *fromStep > 0 && effectiveStart == 0 {
+		effectiveStart = *fromStep
+	}
+	effectiveEnd := *untilStep
+	if *endStep >= 0 && effectiveEnd < 0 {
+		effectiveEnd = *endStep
+	}
 
 	fmt.Println("==================================================")
 	fmt.Println("  Fusion 360 -> SolidCraft Parametric Translator  ")
@@ -114,7 +128,14 @@ func main() {
 	fmt.Println("Compiling and replaying timeline into SolidCraft...")
 	compiler := solidcraft.NewCompiler(scClient)
 	doVerify := *verify || *findDivergence
-	results, err := compiler.CompileModel(model, doVerify, *untilStep, *findDivergence)
+	results, err := compiler.CompileModelWithOptions(model, solidcraft.CompileOptions{
+		Verify:           doVerify,
+		StartStep:        effectiveStart,
+		UntilStep:        effectiveEnd,
+		StopOnDivergence: *findDivergence,
+		Interactive:      *stepMode,
+		StepFrom:         *stepFrom,
+	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error during compilation: %v\n", err)
 		os.Exit(1)

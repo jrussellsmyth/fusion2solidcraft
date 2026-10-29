@@ -175,7 +175,7 @@ func (c *Client) CallTool(name string, args map[string]interface{}) (string, err
 	text := content.Content[0].Text
 	if content.IsError {
 		if strings.Contains(text, "still running:") {
-			for attempt := 0; attempt < 2; attempt++ {
+			for attempt := 0; attempt < 6; attempt++ {
 				pReq := mcpRequest{
 					JSONRPC: "2.0",
 					ID:      c.reqID,
@@ -192,6 +192,19 @@ func (c *Client) CallTool(name string, args map[string]interface{}) (string, err
 						if json.Unmarshal(pResp.Result, &pContent) == nil && len(pContent.Content) > 0 {
 							pText := pContent.Content[0].Text
 							if !strings.Contains(pText, `"done":false`) && !strings.Contains(pText, `"done": false`) {
+								var pendingRes struct {
+									Done   bool            `json:"done"`
+									Error  string          `json:"error"`
+									Result json.RawMessage `json:"result"`
+								}
+								if json.Unmarshal([]byte(pText), &pendingRes) == nil && pendingRes.Done {
+									if pendingRes.Error != "" {
+										return "", fmt.Errorf("tool error: %s", pendingRes.Error)
+									}
+									if len(pendingRes.Result) > 0 {
+										return string(pendingRes.Result), nil
+									}
+								}
 								break
 							}
 						}

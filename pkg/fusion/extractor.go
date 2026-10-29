@@ -196,18 +196,41 @@ def run(_context: str):
                     return True
 
                 all_splines = []
+                split_spline_entities = set()
+                for p_idx in range(sketch.profiles.count):
+                    prof_item = sketch.profiles.item(p_idx)
+                    if prof_item.areaProperties().area * 100 < 0.05:
+                        continue
+                    for l_idx in range(prof_item.profileLoops.count):
+                        loop_item = prof_item.profileLoops.item(l_idx)
+                        for c_idx in range(loop_item.profileCurves.count):
+                            pc = loop_item.profileCurves.item(c_idx)
+                            ent = getattr(pc, 'sketchEntity', None)
+                            if ent and 'Spline' in type(ent).__name__:
+                                try:
+                                    split_spline_entities.add(ent.entityToken)
+                                except Exception:
+                                    pass
+                                all_splines.append(('pc', pc, bool(getattr(ent, 'isConstruction', False))))
+
                 for s_i in range(sketch.sketchCurves.sketchFittedSplines.count):
-                    all_splines.append(('fitted', sketch.sketchCurves.sketchFittedSplines.item(s_i)))
+                    spl = sketch.sketchCurves.sketchFittedSplines.item(s_i)
+                    if getattr(spl, 'entityToken', None) not in split_spline_entities:
+                        all_splines.append(('fitted', spl, bool(spl.isConstruction)))
                 if hasattr(sketch.sketchCurves, 'sketchFixedSplines'):
                     for s_i in range(sketch.sketchCurves.sketchFixedSplines.count):
-                        all_splines.append(('fixed', sketch.sketchCurves.sketchFixedSplines.item(s_i)))
+                        spl = sketch.sketchCurves.sketchFixedSplines.item(s_i)
+                        if getattr(spl, 'entityToken', None) not in split_spline_entities:
+                            all_splines.append(('fixed', spl, bool(spl.isConstruction)))
                 if hasattr(sketch.sketchCurves, 'sketchControlPointSplines'):
                     for s_i in range(sketch.sketchCurves.sketchControlPointSplines.count):
-                        all_splines.append(('cp', sketch.sketchCurves.sketchControlPointSplines.item(s_i)))
+                        spl = sketch.sketchCurves.sketchControlPointSplines.item(s_i)
+                        if getattr(spl, 'entityToken', None) not in split_spline_entities:
+                            all_splines.append(('cp', spl, bool(spl.isConstruction)))
 
                 seen_spline_sigs = set()
                 s_counter = 0
-                for s_kind, spl in all_splines:
+                for s_kind, spl, is_constr in all_splines:
                     geom = spl.geometry
                     nurbs = geom.asNurbsCurve if hasattr(geom, 'asNurbsCurve') else geom
                     deg = nurbs.degree
@@ -221,7 +244,7 @@ def run(_context: str):
                     ep1 = (round(pt_start.x * 10, 2), round(pt_start.y * 10, 2))
                     ep2 = (round(pt_end.x * 10, 2), round(pt_end.y * 10, 2))
                     mp = (round(pt_mid.x * 10, 2), round(pt_mid.y * 10, 2))
-                    sig = (min(ep1, ep2), max(ep1, ep2), mp, bool(spl.isConstruction))
+                    sig = (min(ep1, ep2), max(ep1, ep2), mp, is_constr)
                     if sig in seen_spline_sigs:
                         continue
                     seen_spline_sigs.add(sig)
@@ -241,7 +264,7 @@ def run(_context: str):
                             "degree": deg,
                             "control_points": cps,
                             "points": pts,
-                            "construction": bool(spl.isConstruction)
+                            "construction": is_constr
                         })
                     elif _is_piecewise_bezier3(deg, knots, len(cps)):
                         n_segs = (len(cps) - 1) // 3
@@ -254,7 +277,7 @@ def run(_context: str):
                                 "degree": 3,
                                 "control_points": seg_cps,
                                 "points": [seg_cps[0], seg_cps[-1]],
-                                "construction": bool(spl.isConstruction)
+                                "construction": is_constr
                             })
                     else:
                         n_samples = max(12, len(cps) * 2)
@@ -268,7 +291,7 @@ def run(_context: str):
                             "id": f"s{s_counter}",
                             "type": "spline",
                             "points": sampled,
-                            "construction": bool(spl.isConstruction)
+                            "construction": is_constr
                         })
 
                 profiles = []
@@ -369,6 +392,8 @@ def run(_context: str):
                             start_offset += se.offset.value * 10.0
                     except Exception:
                         pass
+                to_target = None
+                to_offset = 0.0
                 if ext.extentOne:
                     if hasattr(ext.extentOne, 'distance') and ext.extentOne.distance:
                         dist_val = ext.extentOne.distance.value * 10.0
@@ -378,9 +403,13 @@ def run(_context: str):
                             end_pos = 0.0
                             if hasattr(to_ent, 'centroid'):
                                 end_pos = _proj_along_normal(to_ent.centroid)
+                                to_target = {"x": to_ent.centroid.x * 10, "y": to_ent.centroid.y * 10, "z": to_ent.centroid.z * 10}
                             elif hasattr(to_ent, 'geometry') and hasattr(to_ent.geometry, 'origin'):
                                 end_pos = _proj_along_normal(to_ent.geometry.origin)
+                                to_target = {"x": to_ent.geometry.origin.x * 10, "y": to_ent.geometry.origin.y * 10, "z": to_ent.geometry.origin.z * 10}
                             dist_val = end_pos - start_offset
+                            if hasattr(ext.extentOne, 'offset') and ext.extentOne.offset:
+                                to_offset = ext.extentOne.offset.value * 10.0
                         except Exception:
                             pass
                 if abs(dist_val) < 0.001 and ext.faces and ext.faces.count > 0:
@@ -495,23 +524,37 @@ def run(_context: str):
                     pass
 
                 face_target = None
+                face_normal = None
+                face_area_mm2 = 0.0
+                face_bbox_min = None
+                face_bbox_max = None
                 if not centroids:
                     try:
                         item.rollTo(True)
                         p_obj = ext.profile
                         if p_obj:
+                            face = None
                             if hasattr(p_obj, 'objectType') and 'BRepFace' in p_obj.objectType:
                                 face = adsk.fusion.BRepFace.cast(p_obj)
-                                c = face.centroid
-                                face_target = {"x": c.x * 10, "y": c.y * 10, "z": c.z * 10}
                             elif hasattr(p_obj, 'count'):
                                 for j in range(p_obj.count):
                                     pj = p_obj.item(j)
                                     if hasattr(pj, 'objectType') and 'BRepFace' in pj.objectType:
                                         face = adsk.fusion.BRepFace.cast(pj)
-                                        c = face.centroid
-                                        face_target = {"x": c.x * 10, "y": c.y * 10, "z": c.z * 10}
                                         break
+                            if face:
+                                c = face.centroid
+                                face_target = {"x": c.x * 10, "y": c.y * 10, "z": c.z * 10}
+                                face_area_mm2 = face.area * 100
+                                if face.boundingBox:
+                                    face_bbox_min = {"x": face.boundingBox.minPoint.x * 10, "y": face.boundingBox.minPoint.y * 10, "z": face.boundingBox.minPoint.z * 10}
+                                    face_bbox_max = {"x": face.boundingBox.maxPoint.x * 10, "y": face.boundingBox.maxPoint.y * 10, "z": face.boundingBox.maxPoint.z * 10}
+                                try:
+                                    ok, n = face.evaluator.getNormalAtPoint(face.pointOnFace)
+                                    if ok:
+                                        face_normal = {"x": n.x, "y": n.y, "z": n.z}
+                                except Exception:
+                                    pass
                         item.rollTo(False)
                     except Exception:
                         try:
@@ -570,7 +613,13 @@ def run(_context: str):
                     "sketch_name": sketch_name,
                     "result_bodies": result_bodies,
                     "participant_bodies": participant_bodies,
-                    "face_target": face_target
+                    "face_target": face_target,
+                    "face_normal": face_normal,
+                    "face_area_mm2": face_area_mm2,
+                    "face_bbox_min": face_bbox_min,
+                    "face_bbox_max": face_bbox_max,
+                    "to_target": to_target,
+                    "to_offset_mm": to_offset
                 }
 
             elif obj_type == 'FilletFeature':
@@ -587,12 +636,20 @@ def run(_context: str):
                     f = fillet.faces.item(f_idx)
                     c = f.centroid
                     edges.append({"x": c.x * 10, "y": c.y * 10, "z": c.z * 10})
+                
+                target_bodies = []
+                try:
+                    for b in fillet.bodies:
+                        target_bodies.append(b.name)
+                except Exception:
+                    pass
                     
                 step_data["fillet"] = {
                     "id": f"fillet_{idx+1}",
                     "name": item.name,
                     "radius_mm": rad,
-                    "target_edges": edges
+                    "target_edges": edges,
+                    "target_bodies": target_bodies
                 }
 
             elif obj_type == 'CombineFeature':
@@ -721,6 +778,7 @@ def run(_context: str):
                     pass
 
                 target_bodies = []
+                result_bodies = []
                 try:
                     item.rollTo(True)
                     if hasattr(mf, 'inputEntities') and mf.inputEntities:
@@ -729,6 +787,10 @@ def run(_context: str):
                             if hasattr(ent, 'name'):
                                 target_bodies.append(ent.name)
                     item.rollTo(False)
+                    if hasattr(mf, 'bodies') and mf.bodies:
+                        for b in mf.bodies:
+                            if b.name not in target_bodies:
+                                result_bodies.append(b.name)
                 except Exception:
                     try:
                         item.rollTo(False)
@@ -739,7 +801,8 @@ def run(_context: str):
                     "id": f"mirror_{idx+1}",
                     "name": item.name,
                     "plane": pname,
-                    "target_bodies": target_bodies
+                    "target_bodies": target_bodies,
+                    "result_bodies": result_bodies
                 }
 
             elif obj_type == 'ConstructionPlane':

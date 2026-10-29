@@ -55,9 +55,14 @@ type SolidExtrudeParams struct {
 	Name        string      `json:"name,omitempty"`
 	BodyName    string      `json:"body_name,omitempty"`
 	Body        string      `json:"body,omitempty"`
+	FaceBody    string      `json:"face_body,omitempty"`
 	Sketch      interface{} `json:"sketch,omitempty"`
 	Face        []float64   `json:"face,omitempty"`
-	Distance    float64     `json:"distance"`
+	Faces       [][]float64 `json:"faces,omitempty"`
+	To          []float64   `json:"to,omitempty"`
+	ToOffset    float64     `json:"to_offset,omitempty"`
+	From        []float64   `json:"from,omitempty"`
+	Distance    float64     `json:"distance,omitempty"`
 	StartOffset float64     `json:"start_offset,omitempty"`
 	Operation   string      `json:"operation,omitempty"` // "new", "join", "cut", "intersect"
 	Profiles    interface{} `json:"profiles,omitempty"`  // [0, 1] or "all"
@@ -68,6 +73,12 @@ type SolidExtrudeParams struct {
 type BodyRenameParams struct {
 	Body string `json:"body"`
 	Name string `json:"name"`
+}
+
+// TimelineRenameParams parameters for timeline.rename.
+type TimelineRenameParams struct {
+	Feature interface{} `json:"feature"`
+	Name    string      `json:"name"`
 }
 
 // SolidFilletParams parameters for solid.fillet.
