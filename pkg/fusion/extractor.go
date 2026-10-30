@@ -908,6 +908,7 @@ def run(_context: str):
             min_pt = [1e9, 1e9, 1e9]
             max_pt = [-1e9, -1e9, -1e9]
             body_count = 0
+            body_snap = []
             all_b = list(root.bRepBodies)
             for occ in root.occurrences:
                 try:
@@ -917,16 +918,35 @@ def run(_context: str):
             for b in all_b:
                 if b.isValid:
                     body_count += 1
-                    total_vol += b.volume * 1000.0
-                    total_area += b.area * 100.0
                     bb = b.boundingBox
+                    vol = b.volume * 1000.0
+                    area = b.area * 100.0
+                    total_vol += vol
+                    total_area += area
                     min_pt[0] = min(min_pt[0], bb.minPoint.x * 10)
                     min_pt[1] = min(min_pt[1], bb.minPoint.y * 10)
                     min_pt[2] = min(min_pt[2], bb.minPoint.z * 10)
                     max_pt[0] = max(max_pt[0], bb.maxPoint.x * 10)
                     max_pt[1] = max(max_pt[1], bb.maxPoint.y * 10)
                     max_pt[2] = max(max_pt[2], bb.maxPoint.z * 10)
+                    cx = (bb.minPoint.x + bb.maxPoint.x) / 2.0 * 10
+                    cy = (bb.minPoint.y + bb.maxPoint.y) / 2.0 * 10
+                    cz = (bb.minPoint.z + bb.maxPoint.z) / 2.0 * 10
+                    try:
+                        com = b.physicalProperties.centerOfMass
+                        cx, cy, cz = com.x * 10, com.y * 10, com.z * 10
+                    except Exception:
+                        pass
+                    body_snap.append({
+                        "name": b.name,
+                        "volume_mm3": vol,
+                        "area_mm2": area,
+                        "centroid": {"x": cx, "y": cy, "z": cz},
+                        "bbox_min": {"x": bb.minPoint.x * 10, "y": bb.minPoint.y * 10, "z": bb.minPoint.z * 10},
+                        "bbox_max": {"x": bb.maxPoint.x * 10, "y": bb.maxPoint.y * 10, "z": bb.maxPoint.z * 10}
+                    })
             if body_count > 0:
+                step_data["body_snapshot"] = body_snap
                 step_data["target_stats"] = {
                     "volume_mm3": total_vol,
                     "area_mm2": total_area,

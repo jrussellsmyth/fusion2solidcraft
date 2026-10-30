@@ -201,24 +201,36 @@ type VerificationStats struct {
 	Centroid  Point3D `json:"centroid"`
 }
 
+// BodySnapshot records one body's state in the source CAD system immediately
+// after a timeline step executes.
+type BodySnapshot struct {
+	Name      string  `json:"name"`
+	VolumeMM3 float64 `json:"volume_mm3"`
+	AreaMM2   float64 `json:"area_mm2"`
+	Centroid  Point3D `json:"centroid"`
+	BBoxMin   Point3D `json:"bbox_min"`
+	BBoxMax   Point3D `json:"bbox_max"`
+}
+
 // TimelineStep represents a single step in the chronological modeling history.
 type TimelineStep struct {
-	Index       int                `json:"index"`
-	Name        string             `json:"name"`
-	Type        string             `json:"type"` // "sketch", "extrude", "fillet", "chamfer", "combine", "move", "mirror", "thread", "plane", "occurrence", "appearance"
-	Sketch      *Sketch            `json:"sketch,omitempty"`
-	Extrude     *ExtrudeFeature    `json:"extrude,omitempty"`
-	Fillet      *FilletFeature     `json:"fillet,omitempty"`
-	Chamfer     *ChamferFeature    `json:"chamfer,omitempty"`
-	Combine     *CombineFeature    `json:"combine,omitempty"`
-	Move        *MoveFeature       `json:"move,omitempty"`
-	Mirror      *MirrorFeature     `json:"mirror,omitempty"`
-	Pattern     *PatternFeature    `json:"pattern,omitempty"`
-	Thread      *ThreadFeature     `json:"thread,omitempty"`
-	Plane       *ConstructionPlane `json:"plane,omitempty"`
-	Occurrence  *Occurrence        `json:"occurrence,omitempty"`
-	Appearance  *AppearanceFeature `json:"appearance,omitempty"`
-	TargetStats *VerificationStats `json:"target_stats,omitempty"`
+	Index        int                `json:"index"`
+	Name         string             `json:"name"`
+	Type         string             `json:"type"` // "sketch", "extrude", "fillet", "chamfer", "combine", "move", "mirror", "thread", "plane", "occurrence", "appearance"
+	Sketch       *Sketch            `json:"sketch,omitempty"`
+	Extrude      *ExtrudeFeature    `json:"extrude,omitempty"`
+	Fillet       *FilletFeature     `json:"fillet,omitempty"`
+	Chamfer      *ChamferFeature    `json:"chamfer,omitempty"`
+	Combine      *CombineFeature    `json:"combine,omitempty"`
+	Move         *MoveFeature       `json:"move,omitempty"`
+	Mirror       *MirrorFeature     `json:"mirror,omitempty"`
+	Pattern      *PatternFeature    `json:"pattern,omitempty"`
+	Thread       *ThreadFeature     `json:"thread,omitempty"`
+	Plane        *ConstructionPlane `json:"plane,omitempty"`
+	Occurrence   *Occurrence        `json:"occurrence,omitempty"`
+	Appearance   *AppearanceFeature `json:"appearance,omitempty"`
+	TargetStats  *VerificationStats `json:"target_stats,omitempty"`
+	BodySnapshot []BodySnapshot     `json:"body_snapshot,omitempty"`
 }
 
 // Model represents a complete parametric CAD document.
