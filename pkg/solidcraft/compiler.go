@@ -347,8 +347,18 @@ func (c *Compiler) CompileModelWithOptions(model *cadir.Model, opts CompileOptio
 	return results, nil
 }
 
+// snapCoord snaps a sketch coordinate to a 1e-4 mm grid so that coincident
+// and tangential geometry is exactly coincident for the SolidCraft kernel.
+func snapCoord(v float64) float64 {
+	return math.Round(v*1e4) / 1e4
+}
+
 func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 	var cmds []Command
+
+	// Universal pre-conditioning: split arcs at circle intersections so SolidCraft
+	// region detection sees the same trimmed curve arrangement Fusion used.
+	curves := cadir.SplitArcsAtCircles(s.Curves)
 
 	// 1. sketch.create
 	plane := s.Plane
@@ -367,110 +377,60 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 		},
 	})
 
-	// Detect any circle radius for curve pre-conditioning
-	circleRadius := 0.0
-	for _, curve := range s.Curves {
+	// 2. Draw circles
+	for _, curve := range curves {
 		if curve.Type == cadir.CurveTypeCircle && curve.Radius > 0 {
-			circleRadius = curve.Radius
 			cmds = append(cmds, Command{
 				ID: "sketch.circle.center",
 				Params: SketchCircleCenterParams{
-					Center:       []float64{curve.Center.X, curve.Center.Y},
-					Radius:       curve.Radius,
+					Center:       []float64{snapCoord(curve.Center.X), snapCoord(curve.Center.Y)},
+					Radius:       snapCoord(curve.Radius),
 					Construction: curve.Construction,
 				},
 			})
 		}
 	}
 
-	// 2. Draw lines
-	for _, curve := range s.Curves {
+	// 3. Draw lines
+	for _, curve := range curves {
 		if curve.Type == cadir.CurveTypeLine {
-			sx, sy := curve.Start.X, curve.Start.Y
-			ex, ey := curve.End.X, curve.End.Y
-			if s.Name == "usbc" {
-				sx = math.Round(sx*1e4) / 1e4
-				sy = math.Round(sy*1e4) / 1e4
-				ex = math.Round(ex*1e4) / 1e4
-				ey = math.Round(ey*1e4) / 1e4
-			}
 			cmds = append(cmds, Command{
 				ID: "sketch.line",
 				Params: SketchLineParams{
-					Points:       [][]float64{{sx, sy}, {ex, ey}},
+					Points: [][]float64{
+						{snapCoord(curve.Start.X), snapCoord(curve.Start.Y)},
+						{snapCoord(curve.End.X), snapCoord(curve.End.Y)},
+					},
 					Construction: curve.Construction,
 				},
 			})
 		}
 	}
 
-	// 3. Draw arcs (with CCW normalization and circle-intersection pre-conditioning)
-	for _, curve := range s.Curves {
+	// 4. Draw arcs (CCW-normalized)
+	for _, curve := range curves {
 		if curve.Type == cadir.CurveTypeArc {
 			start, end := cadir.NormalizeArc(curve.Center, curve.Start, curve.End, curve.MidPoint)
-			cx, cy := curve.Center.X, curve.Center.Y
-			if s.Name == "usbc" {
-				cx = math.Round(cx*1e4) / 1e4
-				cy = math.Round(cy*1e4) / 1e4
-				start.X = math.Round(start.X*1e4) / 1e4
-				start.Y = math.Round(start.Y*1e4) / 1e4
-				end.X = math.Round(end.X*1e4) / 1e4
-				end.Y = math.Round(end.Y*1e4) / 1e4
-			}
-
-			// If this arc intersects a circle centered at origin twice, split it at intersection
-			if s.Name == "Socket" && circleRadius > 0 {
-				inters := cadir.CircleArcIntersections(circleRadius, curve.Center, curve.Radius)
-				if len(inters) == 2 {
-					// Check if intersection 1 lies along the arc
-					pInt := inters[0]
-					dStart := cadir.Distance2D(start, pInt)
-					dEnd := cadir.Distance2D(end, pInt)
-					if dStart > 0.1 && dEnd > 0.1 {
-						// Split into two sub-arcs
-						cmds = append(cmds, Command{
-							ID: "sketch.arc.center_point",
-							Params: SketchArcCenterPointParams{
-								Center:       []float64{curve.Center.X, curve.Center.Y},
-								Start:        []float64{pInt.X, pInt.Y},
-								End:          []float64{end.X, end.Y},
-								Construction: curve.Construction,
-							},
-						})
-						cmds = append(cmds, Command{
-							ID: "sketch.arc.center_point",
-							Params: SketchArcCenterPointParams{
-								Center:       []float64{curve.Center.X, curve.Center.Y},
-								Start:        []float64{start.X, start.Y},
-								End:          []float64{pInt.X, pInt.Y},
-								Construction: curve.Construction,
-							},
-						})
-						continue
-					}
-				}
-			}
-
 			cmds = append(cmds, Command{
 				ID: "sketch.arc.center_point",
 				Params: SketchArcCenterPointParams{
-					Center:       []float64{cx, cy},
-					Start:        []float64{start.X, start.Y},
-					End:          []float64{end.X, end.Y},
+					Center:       []float64{snapCoord(curve.Center.X), snapCoord(curve.Center.Y)},
+					Start:        []float64{snapCoord(start.X), snapCoord(start.Y)},
+					End:          []float64{snapCoord(end.X), snapCoord(end.Y)},
 					Construction: curve.Construction,
 				},
 			})
 		}
 	}
 
-	// 4. Draw splines
+	// 5. Draw splines
 	hasSplines := false
-	for _, curve := range s.Curves {
+	for _, curve := range curves {
 		if curve.Type == cadir.CurveTypeSpline {
 			if len(curve.ControlPoints) >= 2 && (curve.Degree == 5 || curve.Degree == 3) {
 				var cpts [][]float64
 				for _, pt := range curve.ControlPoints {
-					cpts = append(cpts, []float64{pt.X, pt.Y})
+					cpts = append(cpts, []float64{snapCoord(pt.X), snapCoord(pt.Y)})
 				}
 				cmdID := "sketch.spline.control_point"
 				if curve.Degree == 5 {
@@ -488,7 +448,7 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 			}
 			var pts [][]float64
 			for _, pt := range curve.Points {
-				pts = append(pts, []float64{pt.X, pt.Y})
+				pts = append(pts, []float64{snapCoord(pt.X), snapCoord(pt.Y)})
 			}
 			if len(pts) >= 2 {
 				cmds = append(cmds, Command{
@@ -507,7 +467,7 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 		cmds = append(cmds, Command{ID: "sketch.loose_ends.tie", Params: map[string]interface{}{}})
 	}
 
-	// 5. sketch.finish
+	// 6. sketch.finish
 	cmds = append(cmds, Command{ID: "sketch.finish"})
 
 	_, err := c.client.Batch(cmds)
