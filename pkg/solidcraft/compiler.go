@@ -30,7 +30,6 @@ type Compiler struct {
 	sketchNameToID    map[string]int
 	planes            map[string]cadir.ConstructionPlane
 	sketchPlaneByName map[string][3][3]float64 // name -> {origin, xDir, yDir}
-	syntheticSeq      int
 	usedFeatureName   map[string]int
 	model             *cadir.Model // active model during CompileModelWithOptions (snapshot lookahead)
 	curStep           int          // index of the timeline step currently being compiled

@@ -19,6 +19,7 @@ func TestParseSkipSteps(t *testing.T) {
 		{spec: "5-3", err: true},
 		{spec: "abc", err: true},
 		{spec: "1,", want: map[int]bool{1: true}},
+		{spec: "0-1000000", err: true},
 	}
 	for _, tc := range cases {
 		got, err := parseSkipSteps(tc.spec)

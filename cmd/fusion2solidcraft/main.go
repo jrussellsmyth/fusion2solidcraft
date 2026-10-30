@@ -205,6 +205,9 @@ func parseSkipSteps(spec string) (map[int]bool, error) {
 			if errLo != nil || errHi != nil || b < a {
 				return nil, fmt.Errorf("bad range %q", tok)
 			}
+			if b-a > 100000 {
+				return nil, fmt.Errorf("range %q too large", tok)
+			}
 			for i := a; i <= b; i++ {
 				out[i] = true
 			}

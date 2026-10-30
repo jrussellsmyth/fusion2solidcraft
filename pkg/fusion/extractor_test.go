@@ -5,6 +5,9 @@ import (
 )
 
 func TestExtractModel(t *testing.T) {
+	if !fusionServerUp() {
+		t.Skip("Fusion MCP not reachable at 127.0.0.1:27182; skipping live test")
+	}
 	client := NewClient("")
 	extractor := NewExtractor(client)
 
