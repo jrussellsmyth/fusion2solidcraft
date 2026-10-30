@@ -204,3 +204,47 @@ func SplitArcsAtCircles(curves []Curve) []Curve {
 	}
 	return out
 }
+
+// PlaneBasis returns the (origin, xDir, yDir) world basis for an IR sketch
+// plane value: "XY", "XZ", "YZ", or a map with "origin"/"x_dir"/"y_dir"
+// float arrays. ok is false for unknown shapes.
+func PlaneBasis(plane interface{}) (origin, xDir, yDir [3]float64, ok bool) {
+	switch p := plane.(type) {
+	case string:
+		switch p {
+		case "XY":
+			return [3]float64{}, [3]float64{1, 0, 0}, [3]float64{0, 1, 0}, true
+		case "XZ":
+			return [3]float64{}, [3]float64{1, 0, 0}, [3]float64{0, 0, 1}, true
+		case "YZ":
+			return [3]float64{}, [3]float64{0, 1, 0}, [3]float64{0, 0, 1}, true
+		}
+	case map[string]interface{}:
+		readVec := func(key string) ([3]float64, bool) {
+			raw, present := p[key]
+			if !present {
+				return [3]float64{}, false
+			}
+			arr, isArr := raw.([]interface{})
+			if !isArr || len(arr) < 3 {
+				return [3]float64{}, false
+			}
+			var v [3]float64
+			for i := 0; i < 3; i++ {
+				f, isNum := arr[i].(float64)
+				if !isNum {
+					return [3]float64{}, false
+				}
+				v[i] = f
+			}
+			return v, true
+		}
+		o, okO := readVec("origin")
+		x, okX := readVec("x_dir")
+		y, okY := readVec("y_dir")
+		if okO && okX && okY {
+			return o, x, y, true
+		}
+	}
+	return origin, xDir, yDir, false
+}

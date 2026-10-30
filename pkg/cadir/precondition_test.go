@@ -98,3 +98,27 @@ func TestSplitArcsAtCircles_EndpointTouchDoesNotSplit(t *testing.T) {
 		t.Fatalf("arc touching circle only at endpoints must not split, got %d curves", len(out))
 	}
 }
+
+func TestPlaneBasis(t *testing.T) {
+	o, x, y, ok := PlaneBasis("XY")
+	if !ok || o != [3]float64{0, 0, 0} || x != [3]float64{1, 0, 0} || y != [3]float64{0, 1, 0} {
+		t.Fatalf("XY basis wrong: %v %v %v %v", o, x, y, ok)
+	}
+	_, _, _, ok = PlaneBasis("YZ")
+	if !ok {
+		t.Fatal("YZ must resolve")
+	}
+	_, _, _, ok = PlaneBasis(nil)
+	if ok {
+		t.Fatal("nil plane must not resolve")
+	}
+	custom := map[string]interface{}{
+		"origin": []interface{}{10.0, 20.0, 30.0},
+		"x_dir":  []interface{}{0.0, 1.0, 0.0},
+		"y_dir":  []interface{}{0.0, 0.0, 1.0},
+	}
+	o, x, y, ok = PlaneBasis(custom)
+	if !ok || o != [3]float64{10, 20, 30} || x != [3]float64{0, 1, 0} || y != [3]float64{0, 0, 1} {
+		t.Fatalf("custom plane basis wrong: %v %v %v %v", o, x, y, ok)
+	}
+}
