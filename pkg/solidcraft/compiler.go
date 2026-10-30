@@ -580,7 +580,7 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, desiredBodyNam
 		return
 	}
 	// Do not merge the small MCU Lid into the main keyboard body during Extrude56, or merge the two bottom covers together
-	if e.Name == "Extrude56" || e.Name == "Extrude65" || e.Name == "Extrude66" {
+	if e.Name == "Extrude56" {
 		return
 	}
 	inspAfter, err := c.client.CallTool("inspect_design", map[string]interface{}{})
@@ -741,7 +741,7 @@ func (c *Compiler) finalizeExtrudeBodies(e cadir.ExtrudeFeature) {
 		_ = c.renameBody("Xiao_RP2040_Fifi_Left_McuCover", "Xiao_RP2040_Fifi_Left_Body")
 		_ = c.renameBody("Corne36_Left_MCULid", "Xiao_RP2040_Fifi_Left_McuCover")
 	}
-	if e.Name == "Extrude65" || e.Name == "Extrude66" {
+	if false {
 		mergeIdx := 0
 		for pass := 0; pass < 3; pass++ {
 			inspOut, err := c.client.CallTool("inspect_design", map[string]interface{}{})
@@ -1201,150 +1201,10 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		sketchRef = e.SketchName
 	}
 
-	if e.Name == "Extrude51" && len(targetIndices) > 0 {
-		// Split connector profiles by left (X < 60) vs right (X > 60) body and cut each body directly
-		profCentroidX := make(map[int]float64)
-		for _, sp := range scProfiles {
-			if len(sp.CentroidSketch) >= 1 {
-				profCentroidX[sp.Index] = sp.CentroidSketch[0]
-			}
+	if (e.Operation == "join" || e.Operation == "cut") && len(targetIndices) > 0 && len(e.ResultBodies) > 1 {
+		if c.compileMultiBodyExtrude(e, scProfilesCentroids(scProfiles), targetIndices, sketchRef) {
+			return nil
 		}
-		var leftProfs, rightProfs []int
-		for _, idx := range targetIndices {
-			if profCentroidX[idx] < 60.0 {
-				leftProfs = append(leftProfs, idx)
-			} else {
-				rightProfs = append(rightProfs, idx)
-			}
-		}
-		type sideGroup struct {
-			name   string
-			profs  []int
-			target string
-		}
-		var groups []sideGroup
-		if len(rightProfs) > 0 {
-			groups = append(groups, sideGroup{e.Name, rightProfs, "Xiao_RP2040_Fifi_Right_Body_"})
-		}
-		if len(leftProfs) > 0 {
-			leftName := fmt.Sprintf("Synthetic_%s_Left", e.Name)
-			if len(groups) == 0 {
-				leftName = e.Name
-			}
-			groups = append(groups, sideGroup{leftName, leftProfs, "Xiao_RP2040_Fifi_Left_McuCover"})
-		}
-		for _, g := range groups {
-			actualTarget := g.target
-			if mapped, ok := c.bodyMap[g.target]; ok {
-				actualTarget = mapped
-			}
-			cp := SolidExtrudeParams{
-				Name:      g.name,
-				Distance:  e.DistanceMM,
-				Operation: "cut",
-				Profiles:  g.profs,
-				Targets:   []string{actualTarget},
-				Sketch:    sketchRef,
-			}
-			cResp, cErr := c.client.Execute("solid.extrude", cp)
-			if cErr == nil {
-				c.renameFeature(cResp, g.name)
-				c.checkAndRenameBodies(cResp, actualTarget)
-			} else {
-				fmt.Printf("Notice: extrude %s (%s) could not apply: %v\n", g.name, actualTarget, cErr)
-			}
-		}
-		return nil
-	}
-
-	if e.Name == "Extrude44" && len(targetIndices) > 0 {
-		// Split BodyOutline profiles by left (X < 60) vs right (X > 60) and perform direct join extrude
-		profCentroidX := make(map[int]float64)
-		for _, sp := range scProfiles {
-			if len(sp.CentroidSketch) >= 1 {
-				profCentroidX[sp.Index] = sp.CentroidSketch[0]
-			}
-		}
-		var leftProfs, rightProfs []int
-		for _, idx := range targetIndices {
-			if profCentroidX[idx] < 60.0 {
-				leftProfs = append(leftProfs, idx)
-			} else {
-				rightProfs = append(rightProfs, idx)
-			}
-		}
-		type halfExtrude struct {
-			name       string
-			profs      []int
-			targetBody string
-		}
-		var halves []halfExtrude
-		if len(leftProfs) > 0 {
-			halves = append(halves, halfExtrude{
-				name:       e.Name,
-				profs:      leftProfs,
-				targetBody: "Xiao_RP2040_Fifi_Left_McuCover",
-			})
-		}
-		if len(rightProfs) > 0 {
-			rName := e.Name
-			if len(halves) > 0 {
-				rName = fmt.Sprintf("Synthetic_%s_Right", e.Name)
-			}
-			halves = append(halves, halfExtrude{
-				name:       rName,
-				profs:      rightProfs,
-				targetBody: "Xiao_RP2040_Fifi_Right_Body_",
-			})
-		}
-		for _, h := range halves {
-			actualTarget := h.targetBody
-			if mapped, ok := c.bodyMap[h.targetBody]; ok {
-				actualTarget = mapped
-			}
-			// Find all participant bodies on this side to join into target
-			var sideTargets []string
-			sideTargets = append(sideTargets, actualTarget)
-			for _, pb := range e.ParticipantBodies {
-				actualPB := pb
-				if mapped, ok := c.bodyMap[pb]; ok {
-					actualPB = mapped
-				}
-				if actualPB == actualTarget {
-					continue
-				}
-				// Check which side pb belongs to
-				isThisSide := false
-				if h.targetBody == "Xiao_RP2040_Fifi_Left_McuCover" {
-					if strings.Contains(actualPB, "5") || strings.Contains(actualPB, "7") || strings.Contains(actualPB, "9") || actualPB == "SocketTemplate (1)" {
-						isThisSide = true
-					}
-				} else {
-					if strings.Contains(actualPB, "6") || strings.Contains(actualPB, "8") || strings.Contains(actualPB, "10") || actualPB == "SocketTemplate (1) (1)" {
-						isThisSide = true
-					}
-				}
-				if isThisSide {
-					sideTargets = append(sideTargets, actualPB)
-				}
-			}
-			ep := SolidExtrudeParams{
-				Name:      h.name,
-				Distance:  8.0,
-				Operation: "join",
-				Profiles:  h.profs,
-				Targets:   sideTargets,
-				Sketch:    sketchRef,
-			}
-			resp, err := c.client.Execute("solid.extrude", ep)
-			if err == nil {
-				c.renameFeature(resp, h.name)
-				c.checkAndRenameBodies(resp, actualTarget)
-			} else {
-				fmt.Printf("Notice: Extrude44 half %s error: %v\n", h.name, err)
-			}
-		}
-		return nil
 	}
 
 	if e.Operation == "join" && len(targetIndices) > 1 {
@@ -1365,11 +1225,6 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 				CreatedBodies []string `json:"created_bodies"`
 			}
 			if json.Unmarshal([]byte(resp), &res) == nil && len(res.CreatedBodies) > 0 {
-				if e.Name == "Extrude65" || e.Name == "Extrude66" {
-					// Keep right and left bottom covers separate; finalizeExtrudeBodies merges touching Body* pieces
-					c.mergeParticipantBodies(e, desiredBodyName)
-					return nil
-				}
 				combIdx := 0
 				for _, created := range res.CreatedBodies {
 					combined := false
@@ -1844,12 +1699,6 @@ func (c *Compiler) compileAndExecuteMirror(mf cadir.MirrorFeature) error {
 			"origin": []float64{pl.Origin.X, pl.Origin.Y, pl.Origin.Z},
 			"normal": []float64{pl.Normal.X, pl.Normal.Y, pl.Normal.Z},
 		}
-	} else if mf.Plane == "" || mf.Plane == "Plane2" {
-		// Plane2 is at X=60 with normal [-1, 0, 0]
-		planeArg = map[string]interface{}{
-			"origin": []float64{60.0, -12.95, 0.0},
-			"normal": []float64{-1.0, 0.0, 0.0},
-		}
 	}
 
 	resp, err := c.client.Execute("solid.mirror", SolidMirrorParams{
@@ -2020,4 +1869,159 @@ func (c *Compiler) compileAndExecuteAppearance(a cadir.AppearanceFeature) error 
 	}
 	_, err := c.client.Execute("appearance.assign", params)
 	return err
+}
+
+type profCentroid struct {
+	Index int
+	X, Y  float64
+}
+
+func scProfilesCentroids[T any](ps []T) []profCentroid { return nil }
+
+// compileMultiBodyExtrude performs a join/cut extrude whose result spans several
+// disjoint bodies. Profiles and participant bodies are assigned to whichever result
+// body they overlap (by bounding box) rather than by name or coordinate thresholds.
+func (c *Compiler) compileMultiBodyExtrude(e cadir.ExtrudeFeature, _ []profCentroid, profs []int, sketchRef interface{}) bool {
+	insp, err := c.client.CallTool("inspect_design", map[string]interface{}{})
+	if err != nil {
+		return false
+	}
+	var d struct {
+		Bodies []struct {
+			Name string `json:"name"`
+			BBox struct {
+				Min []float64 `json:"min"`
+				Max []float64 `json:"max"`
+			} `json:"bbox"`
+		} `json:"bodies"`
+		Sketches []struct {
+			ID       int    `json:"id"`
+			Name     string `json:"name"`
+			Profiles []struct {
+				Index          int       `json:"index"`
+				CentroidSketch []float64 `json:"centroid_sketch"`
+			} `json:"profiles"`
+		} `json:"sketches"`
+	}
+	if json.Unmarshal([]byte(insp), &d) != nil {
+		return false
+	}
+	type box struct{ min, max []float64 }
+	boxes := map[string]box{}
+	for _, b := range d.Bodies {
+		if len(b.BBox.Min) >= 3 && len(b.BBox.Max) >= 3 {
+			boxes[b.Name] = box{b.BBox.Min, b.BBox.Max}
+		}
+	}
+	var targets []string
+	for _, rb := range e.ResultBodies {
+		n := rb
+		if m, ok := c.bodyMap[rb]; ok {
+			n = m
+		}
+		if _, ok := boxes[n]; ok {
+			targets = append(targets, n)
+		}
+	}
+	if len(targets) < 2 {
+		return false
+	}
+	dist2D := func(b box, x, y float64) float64 {
+		dx := math.Max(math.Max(b.min[0]-x, 0), x-b.max[0])
+		dy := math.Max(math.Max(b.min[1]-y, 0), y-b.max[1])
+		return math.Hypot(dx, dy)
+	}
+	centroids := map[int][2]float64{}
+	for _, sk := range d.Sketches {
+		match := false
+		if id, ok := c.sketchNameToID[e.SketchName]; ok {
+			match = sk.ID == id
+		} else {
+			match = sk.Name == e.SketchName
+		}
+		if match {
+			for _, p := range sk.Profiles {
+				if len(p.CentroidSketch) >= 2 {
+					centroids[p.Index] = [2]float64{p.CentroidSketch[0], p.CentroidSketch[1]}
+				}
+			}
+		}
+	}
+	groups := map[string][]int{}
+	for _, idx := range profs {
+		ct, ok := centroids[idx]
+		if !ok {
+			return false
+		}
+		best, bd := "", math.MaxFloat64
+		for _, t := range targets {
+			if dd := dist2D(boxes[t], ct[0], ct[1]); dd < bd {
+				best, bd = t, dd
+			}
+		}
+		groups[best] = append(groups[best], idx)
+	}
+	center := func(b box) (float64, float64, float64) {
+		return (b.min[0] + b.max[0]) / 2, (b.min[1] + b.max[1]) / 2, (b.min[2] + b.max[2]) / 2
+	}
+	side := map[string][]string{}
+	for _, pb := range e.ParticipantBodies {
+		n := pb
+		if m, ok := c.bodyMap[pb]; ok {
+			n = m
+		}
+		pbx, ok := boxes[n]
+		if !ok {
+			continue
+		}
+		isTarget := false
+		for _, t := range targets {
+			if t == n {
+				isTarget = true
+			}
+		}
+		if isTarget {
+			continue
+		}
+		px, py, pz := center(pbx)
+		best, bd := "", math.MaxFloat64
+		for _, t := range targets {
+			x, y, z := center(boxes[t])
+			if dd := math.Sqrt((px-x)*(px-x) + (py-y)*(py-y) + (pz-z)*(pz-z)); dd < bd {
+				best, bd = t, dd
+			}
+		}
+		side[best] = append(side[best], n)
+	}
+	first := true
+	for _, t := range targets {
+		ps := groups[t]
+		if len(ps) == 0 {
+			continue
+		}
+		name := e.Name
+		if !first {
+			name = fmt.Sprintf("Synthetic_%s_%s", e.Name, t)
+		}
+		first = false
+		params := SolidExtrudeParams{
+			Name:      name,
+			Distance:  e.DistanceMM,
+			Operation: string(e.Operation),
+			Profiles:  ps,
+			Targets:   append([]string{t}, side[t]...),
+			Sketch:    sketchRef,
+		}
+		if e.StartOffsetMM != 0 {
+			params.StartOffset = e.StartOffsetMM
+		}
+		resp, err := c.client.Execute("solid.extrude", params)
+		if err != nil {
+			fmt.Printf("Notice: extrude %s (%s) could not apply: %v\n", name, t, err)
+			continue
+		}
+		c.renameFeature(resp, name)
+		c.checkAndRenameBodies(resp, t)
+	}
+	return true
 }
