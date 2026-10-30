@@ -73,6 +73,15 @@ func TestPlanRenames_DropsUnresolvableTarget(t *testing.T) {
 	}
 }
 
+func TestPlanRenames_DropsDeadEndChain(t *testing.T) {
+	// C exists and is never renamed away, so B->C and transitively A->B are
+	// unresolvable and must be dropped (empty plan), deterministically.
+	plan := PlanRenames([]string{"A", "B", "C"}, map[string]string{"A": "B", "B": "C"})
+	if len(plan) != 0 {
+		t.Fatalf("dead-end chain must be dropped, got %v", plan)
+	}
+}
+
 func TestPlanRenames_SwapUsesTempName(t *testing.T) {
 	plan := PlanRenames([]string{"A", "B"}, map[string]string{"A": "B", "B": "A"})
 	if len(plan) != 3 {

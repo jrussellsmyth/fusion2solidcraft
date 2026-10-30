@@ -39,7 +39,15 @@ func MatchBodies(actual, expected []BodySnapshot) map[int]int {
 			cands = append(cands, candidate{ai: ai, ei: ei, score: rel + d})
 		}
 	}
-	sort.Slice(cands, func(i, j int) bool { return cands[i].score < cands[j].score })
+	sort.Slice(cands, func(i, j int) bool {
+		if cands[i].score != cands[j].score {
+			return cands[i].score < cands[j].score
+		}
+		if cands[i].ai != cands[j].ai {
+			return cands[i].ai < cands[j].ai
+		}
+		return cands[i].ei < cands[j].ei
+	})
 	matches := make(map[int]int)
 	usedActual := make(map[int]bool, len(actual))
 	usedExpected := make(map[int]bool, len(expected))
@@ -83,15 +91,14 @@ func PlanRenames(current []string, desired map[string]string) [][2]string {
 				return true // cycle: every member renames away; temp names order them
 			}
 			seen[cur] = true
-			to := pending[cur]
+			to := pending[cur] // cur is always a pending key here
 			if !live[to] {
 				return true // target already free
 			}
-			next, ok := pending[to]
-			if !ok {
+			if _, ok := pending[to]; !ok {
 				return false // target occupied by a body that never moves
 			}
-			cur = next
+			cur = to // walk to the target's owner's rename node
 		}
 		return true
 	}
@@ -116,8 +123,14 @@ func PlanRenames(current []string, desired map[string]string) [][2]string {
 		if !progressed && len(pending) > 0 {
 			// Cycle: park one body under a temp name to break it.
 			for from, to := range pending {
-				tmp := fmt.Sprintf("__rename_tmp_%d", tmpCount)
-				tmpCount++
+				var tmp string
+				for {
+					tmp = fmt.Sprintf("__rename_tmp_%d", tmpCount)
+					tmpCount++
+					if !live[tmp] {
+						break
+					}
+				}
 				plan = append(plan, [2]string{from, tmp})
 				live[from] = false
 				live[tmp] = true
