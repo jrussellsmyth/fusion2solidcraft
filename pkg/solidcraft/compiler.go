@@ -25,22 +25,24 @@ type CompileOptions struct {
 
 // Compiler translates CAD-IR models into SolidCraft executable commands.
 type Compiler struct {
-	client          *Client
-	bodyMap         map[string]string
-	sketchNameToID  map[string]int
-	planes          map[string]cadir.ConstructionPlane
-	syntheticSeq    int
-	usedFeatureName map[string]int
+	client            *Client
+	bodyMap           map[string]string
+	sketchNameToID    map[string]int
+	planes            map[string]cadir.ConstructionPlane
+	sketchPlaneByName map[string][3][3]float64 // name -> {origin, xDir, yDir}
+	syntheticSeq      int
+	usedFeatureName   map[string]int
 }
 
 // NewCompiler creates a new Compiler.
 func NewCompiler(client *Client) *Compiler {
 	return &Compiler{
-		client:          client,
-		bodyMap:         make(map[string]string),
-		sketchNameToID:  make(map[string]int),
-		planes:          make(map[string]cadir.ConstructionPlane),
-		usedFeatureName: make(map[string]int),
+		client:            client,
+		bodyMap:           make(map[string]string),
+		sketchNameToID:    make(map[string]int),
+		planes:            make(map[string]cadir.ConstructionPlane),
+		sketchPlaneByName: make(map[string][3][3]float64),
+		usedFeatureName:   make(map[string]int),
 	}
 }
 
@@ -156,6 +158,11 @@ func (c *Compiler) hydrateStateFromDesign(model *cadir.Model, startStep int) {
 	for _, step := range model.Timeline {
 		if step.Index < startStep && step.Type == "plane" && step.Plane != nil {
 			c.planes[step.Name] = *step.Plane
+		}
+		if step.Index < startStep && step.Type == "sketch" && step.Sketch != nil {
+			if o, xd, yd, ok := cadir.PlaneBasis(step.Sketch.Plane); ok {
+				c.sketchPlaneByName[step.Sketch.Name] = [3][3]float64{o, xd, yd}
+			}
 		}
 	}
 	inspOut, err := c.client.CallTool("inspect_design", map[string]interface{}{})
@@ -358,7 +365,7 @@ func (c *Compiler) CompileModelWithOptions(model *cadir.Model, opts CompileOptio
 			if step.Extrude == nil {
 				continue
 			}
-			if err := c.compileAndExecuteExtrude(*step.Extrude); err != nil {
+			if err := c.compileAndExecuteExtrude(*step.Extrude, step.BodySnapshot); err != nil {
 				return results, fmt.Errorf("step %d (%s) failed: %w", step.Index, step.Name, err)
 			}
 
@@ -570,6 +577,9 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 	if err != nil {
 		return err
 	}
+	if o, xd, yd, ok := cadir.PlaneBasis(s.Plane); ok {
+		c.sketchPlaneByName[s.Name] = [3][3]float64{o, xd, yd}
+	}
 	inspOut, iErr := c.client.CallTool("inspect_design", map[string]interface{}{})
 	if iErr == nil {
 		var designData struct {
@@ -671,13 +681,27 @@ func (c *Compiler) collectCoplanarFaces(bodyName string, e cadir.ExtrudeFeature)
 	return faces
 }
 
-func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, desiredBodyName string) {
+func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, snap []cadir.BodySnapshot, desiredBodyName string) {
 	if e.Operation != "join" || len(e.ParticipantBodies) <= 1 {
 		return
 	}
-	// Do not merge the small MCU Lid into the main keyboard body during Extrude56, or merge the two bottom covers together
-	if e.Name == "Extrude56" {
-		return
+	// Fusion's own post-step snapshot says which participants it actually
+	// consumed (merged away): exactly those absent from the snapshot.
+	if snap != nil {
+		present := make(map[string]bool, len(snap))
+		for _, b := range snap {
+			present[b.Name] = true
+		}
+		var consumed []string
+		for _, pb := range e.ParticipantBodies {
+			if !present[pb] {
+				consumed = append(consumed, pb)
+			}
+		}
+		if len(consumed) == 0 {
+			return
+		}
+		e.ParticipantBodies = consumed
 	}
 	inspAfter, err := c.client.CallTool("inspect_design", map[string]interface{}{})
 	if err != nil {
@@ -833,10 +857,6 @@ func (c *Compiler) checkAndRenameBodies(execResp string, desiredNames ...string)
 }
 
 func (c *Compiler) finalizeExtrudeBodies(e cadir.ExtrudeFeature) {
-	if e.Name == "Extrude60" {
-		_ = c.renameBody("Xiao_RP2040_Fifi_Left_McuCover", "Xiao_RP2040_Fifi_Left_Body")
-		_ = c.renameBody("Corne36_Left_MCULid", "Xiao_RP2040_Fifi_Left_McuCover")
-	}
 	if false {
 		mergeIdx := 0
 		for pass := 0; pass < 3; pass++ {
@@ -886,7 +906,7 @@ func (c *Compiler) finalizeExtrudeBodies(e cadir.ExtrudeFeature) {
 	}
 }
 
-func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
+func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature, snap []cadir.BodySnapshot) error {
 	if math.Abs(e.DistanceMM) < 0.001 {
 		fmt.Printf("Notice: extrude %s has zero distance, skipping\n", e.Name)
 		return nil
@@ -1180,18 +1200,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		if len(e.ParticipantBodies) > 0 {
 			sourceList = e.ParticipantBodies
 		}
-		if e.Name == "Extrude56" || e.Name == "Extrude57" || e.Name == "Extrude59" || e.Name == "Extrude60" {
-			for _, db := range designData.Bodies {
-				if db.Name == "Corne36_Left_MCULid" {
-					targetBodies = append(targetBodies, "Corne36_Left_MCULid")
-					break
-				}
-			}
-		}
 		for _, rb := range sourceList {
-			if rb == "Corne36_Left_MCULid" && len(targetBodies) > 0 && targetBodies[0] == "Corne36_Left_MCULid" {
-				continue
-			}
 			actual := rb
 			if mapped, ok := c.bodyMap[rb]; ok {
 				actual = mapped
@@ -1202,6 +1211,15 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 					break
 				}
 			}
+		}
+	}
+
+	// Generic fallback: when IR-listed body names do not resolve to scene
+	// bodies, aim at bodies whose bbox intersects the swept volume.
+	if len(targetBodies) == 0 && (e.Operation == "join" || e.Operation == "cut") {
+		targetBodies = c.sweptVolumeTargets(e)
+		if len(targetBodies) > 0 {
+			fmt.Printf("Extrude %s: name-based targets unresolved, using swept-volume fallback %v\n", e.Name, targetBodies)
 		}
 	}
 
@@ -1265,7 +1283,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		if fErr == nil {
 			c.renameAutoProjectionSketch(resp, e.Name)
 			c.checkAndRenameBodies(resp, desiredBodyName)
-			c.mergeParticipantBodies(e, desiredBodyName)
+			c.mergeParticipantBodies(e, snap, desiredBodyName)
 			return nil
 		}
 
@@ -1276,7 +1294,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 			if fErr == nil {
 				c.renameAutoProjectionSketch(resp, e.Name)
 				c.checkAndRenameBodies(resp, desiredBodyName)
-				c.mergeParticipantBodies(e, desiredBodyName)
+				c.mergeParticipantBodies(e, snap, desiredBodyName)
 				return nil
 			}
 		}
@@ -1284,7 +1302,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 
 	if len(targetIndices) == 0 {
 		if len(e.ParticipantBodies) > 1 {
-			c.mergeParticipantBodies(e, desiredBodyName)
+			c.mergeParticipantBodies(e, snap, desiredBodyName)
 			return nil
 		}
 		if len(designData.Sketches) > 0 {
@@ -1354,7 +1372,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 						_ = c.renameBody(created, desiredBodyName)
 					}
 				}
-				c.mergeParticipantBodies(e, desiredBodyName)
+				c.mergeParticipantBodies(e, snap, desiredBodyName)
 				return nil
 			}
 		}
@@ -1383,7 +1401,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 		} else {
 			c.checkAndRenameBodies(resp, desiredBodyName)
 		}
-		c.mergeParticipantBodies(e, desiredBodyName)
+		c.mergeParticipantBodies(e, snap, desiredBodyName)
 		return nil
 	}
 
@@ -1455,7 +1473,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 			}
 		}
 		if succeededCount > 0 {
-			c.mergeParticipantBodies(e, desiredBodyName)
+			c.mergeParticipantBodies(e, snap, desiredBodyName)
 			return nil
 		}
 		if lastErr != nil {
@@ -1466,6 +1484,108 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 
 	fmt.Printf("Notice: extrude %s (%s, %.2f mm) could not apply: %v\n", e.Name, e.Operation, e.DistanceMM, err)
 	return nil
+}
+
+// sweptVolumeTargets returns scene bodies whose bbox intersects the bbox of
+// the extrusion's swept volume, computed from the sketch plane basis, profile
+// bounds, start offset, and extrude distance. Used only as a fallback when
+// name-based target resolution finds nothing.
+func (c *Compiler) sweptVolumeTargets(e cadir.ExtrudeFeature) []string {
+	basis, ok := c.sketchPlaneByName[e.SketchName]
+	if !ok {
+		return nil
+	}
+	origin, xDir, yDir := basis[0], basis[1], basis[2]
+	normal := [3]float64{
+		xDir[1]*yDir[2] - xDir[2]*yDir[1],
+		xDir[2]*yDir[0] - xDir[0]*yDir[2],
+		xDir[0]*yDir[1] - xDir[1]*yDir[0],
+	}
+	minSw := [3]float64{1e9, 1e9, 1e9}
+	maxSw := [3]float64{-1e9, -1e9, -1e9}
+	expand := func(corner2d [2]float64, z float64) {
+		w := [3]float64{
+			origin[0] + xDir[0]*corner2d[0] + yDir[0]*corner2d[1],
+			origin[1] + xDir[1]*corner2d[0] + yDir[1]*corner2d[1],
+			origin[2] + xDir[2]*corner2d[0] + yDir[2]*corner2d[1],
+		}
+		for i := 0; i < 3; i++ {
+			minSw[i] = math.Min(minSw[i], w[i])
+			maxSw[i] = math.Max(maxSw[i], w[i])
+		}
+	}
+	for _, fp := range e.Profiles {
+		minX, maxX := fp.Centroid.X, fp.Centroid.X
+		minY, maxY := fp.Centroid.Y, fp.Centroid.Y
+		if fp.BBoxMin != nil && fp.BBoxMax != nil {
+			minX, minY = fp.BBoxMin.X, fp.BBoxMin.Y
+			maxX, maxY = fp.BBoxMax.X, fp.BBoxMax.Y
+		} else {
+			half := math.Sqrt(math.Max(fp.AreaMM2, 1e-9)) / 2
+			minX, minY = fp.Centroid.X-half, fp.Centroid.Y-half
+			maxX, maxY = fp.Centroid.X+half, fp.Centroid.Y+half
+		}
+		for _, corner := range [][2]float64{{minX, minY}, {maxX, minY}, {minX, maxY}, {maxX, maxY}} {
+			expand(corner, 0)
+		}
+	}
+	if len(e.Profiles) == 0 {
+		for _, pc := range e.ProfileCentroids {
+			half := 1.0
+			for _, corner := range [][2]float64{{pc.X - half, pc.Y - half}, {pc.X + half, pc.Y + half}} {
+				expand(corner, 0)
+			}
+		}
+	}
+	// Extrude along the normal from the start plane to start+distance (either sign).
+	z0 := e.StartOffsetMM
+	z1 := e.StartOffsetMM + e.DistanceMM
+	for _, z := range []float64{z0, z1} {
+		wz := origin[2] + normal[2]*z
+		minSw[2] = math.Min(minSw[2], math.Min(origin[2], wz))
+		maxSw[2] = math.Max(maxSw[2], math.Max(origin[2], wz))
+	}
+	// Expand laterally by the normal's in-plane contribution (tilted planes).
+	for i := 0; i < 2; i++ {
+		tol := 1e-6
+		minSw[i] -= math.Abs(normal[i]*math.Min(z0, z1)) + tol
+		maxSw[i] += math.Abs(normal[i]*math.Max(z0, z1)) + tol
+	}
+
+	inspOut, err := c.client.CallTool("inspect_design", map[string]interface{}{})
+	if err != nil {
+		return nil
+	}
+	var design struct {
+		Bodies []struct {
+			Name string `json:"name"`
+			BBox struct {
+				Min []float64 `json:"min"`
+				Max []float64 `json:"max"`
+			} `json:"bbox"`
+		} `json:"bodies"`
+	}
+	if json.Unmarshal([]byte(inspOut), &design) != nil {
+		return nil
+	}
+	var hits []string
+	for _, b := range design.Bodies {
+		if len(b.BBox.Min) < 3 || len(b.BBox.Max) < 3 {
+			continue
+		}
+		overlap := true
+		for i := 0; i < 3; i++ {
+			if b.BBox.Max[i] < minSw[i] || b.BBox.Min[i] > maxSw[i] {
+				overlap = false
+				break
+			}
+		}
+		if overlap {
+			hits = append(hits, b.Name)
+		}
+	}
+	sort.Strings(hits)
+	return hits
 }
 
 func (c *Compiler) compileAndExecuteMove(m cadir.MoveFeature) error {
@@ -1757,23 +1877,15 @@ func (c *Compiler) compileAndExecuteMirror(mf cadir.MirrorFeature) error {
 	}
 
 	var targetBodies []string
-	for _, b := range designData.Bodies {
-		if b.Name == "Corne36_Left_MCULid" {
-			targetBodies = []string{"Corne36_Left_MCULid"}
-			break
+	for _, tb := range mf.TargetBodies {
+		actual := tb
+		if mapped, ok := c.bodyMap[tb]; ok {
+			actual = mapped
 		}
-	}
-	if len(targetBodies) == 0 && len(mf.TargetBodies) > 0 {
-		for _, tb := range mf.TargetBodies {
-			actual := tb
-			if mapped, ok := c.bodyMap[tb]; ok {
-				actual = mapped
-			}
-			for _, db := range designData.Bodies {
-				if db.Name == actual {
-					targetBodies = append(targetBodies, actual)
-					break
-				}
+		for _, db := range designData.Bodies {
+			if db.Name == actual {
+				targetBodies = append(targetBodies, actual)
+				break
 			}
 		}
 	}
