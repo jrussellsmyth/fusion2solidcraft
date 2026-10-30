@@ -856,62 +856,11 @@ func (c *Compiler) checkAndRenameBodies(execResp string, desiredNames ...string)
 	}
 }
 
-func (c *Compiler) finalizeExtrudeBodies(e cadir.ExtrudeFeature) {
-	if false {
-		mergeIdx := 0
-		for pass := 0; pass < 3; pass++ {
-			inspOut, err := c.client.CallTool("inspect_design", map[string]interface{}{})
-			if err != nil {
-				return
-			}
-			var design struct {
-				Bodies []struct {
-					Name string `json:"name"`
-				} `json:"bodies"`
-			}
-			if json.Unmarshal([]byte(inspOut), &design) != nil {
-				return
-			}
-			var unnamed []string
-			for _, b := range design.Bodies {
-				if strings.HasPrefix(b.Name, "Body") {
-					unnamed = append(unnamed, b.Name)
-				}
-			}
-			if len(unnamed) == 0 {
-				break
-			}
-			mergedInPass := 0
-			for _, bName := range unnamed {
-				for _, target := range []string{"Xiao_RP2040_Fifi_Right_Bottom_Cover", "Xiao_RP2040_Fifi_Left_Bottom_Cover"} {
-					cResp, cErr := c.client.Execute("solid.combine", SolidCombineParams{
-						Target:    target,
-						Tools:     []string{bName},
-						Operation: "join",
-						KeepTools: false,
-					})
-					if cErr == nil {
-						mergeIdx++
-						mergedInPass++
-						c.renameFeature(cResp, fmt.Sprintf("Synthetic_BottomCoverMerge_%s_%d", e.Name, mergeIdx))
-						c.checkAndRenameBodies(cResp, target)
-						break
-					}
-				}
-			}
-			if mergedInPass == 0 {
-				break
-			}
-		}
-	}
-}
-
 func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature, snap []cadir.BodySnapshot) error {
 	if math.Abs(e.DistanceMM) < 0.001 {
 		fmt.Printf("Notice: extrude %s has zero distance, skipping\n", e.Name)
 		return nil
 	}
-	defer c.finalizeExtrudeBodies(e)
 
 	var desiredBodyName string
 	if len(e.ResultBodies) > 0 {
@@ -1327,7 +1276,7 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature, snap []cadir
 	}
 
 	if (e.Operation == "join" || e.Operation == "cut") && len(targetIndices) > 0 && len(e.ResultBodies) > 1 {
-		if c.compileMultiBodyExtrude(e, scProfilesCentroids(scProfiles), targetIndices, sketchRef) {
+		if c.compileMultiBodyExtrude(e, targetIndices, sketchRef) {
 			return nil
 		}
 	}
@@ -1864,8 +1813,7 @@ func (c *Compiler) compileAndExecuteMirror(mf cadir.MirrorFeature) error {
 
 	var designData struct {
 		Bodies []struct {
-			Name      string `json:"name"`
-			FaceCount int    `json:"face_count"`
+			Name string `json:"name"`
 		} `json:"bodies"`
 	}
 	if err := json.Unmarshal([]byte(inspOut), &designData); err != nil {
@@ -1885,25 +1833,6 @@ func (c *Compiler) compileAndExecuteMirror(mf cadir.MirrorFeature) error {
 		for _, db := range designData.Bodies {
 			if db.Name == actual {
 				targetBodies = append(targetBodies, actual)
-				break
-			}
-		}
-	}
-	// If the resolved target body is a huge main keyboard body (> 200 faces) while a smaller lid body exists, prefer the smaller lid body
-	if len(targetBodies) == 1 && strings.Contains(strings.ToLower(targetBodies[0]), "mcucover") {
-		for _, db := range designData.Bodies {
-			if db.Name == targetBodies[0] && db.FaceCount > 200 {
-				var smallestName string
-				smallestFaces := 999999
-				for _, cand := range designData.Bodies {
-					if cand.FaceCount > 0 && cand.FaceCount < 100 && cand.FaceCount < smallestFaces {
-						smallestFaces = cand.FaceCount
-						smallestName = cand.Name
-					}
-				}
-				if smallestName != "" {
-					targetBodies = []string{smallestName}
-				}
 				break
 			}
 		}
@@ -2090,13 +2019,6 @@ func (c *Compiler) compileAndExecuteAppearance(a cadir.AppearanceFeature) error 
 	return err
 }
 
-type profCentroid struct {
-	Index int
-	X, Y  float64
-}
-
-func scProfilesCentroids[T any](ps []T) []profCentroid { return nil }
-
 // isNearestFusionProfile reports whether the Fusion profile at index fi is the
 // closest Fusion profile (by sketch-space centroid) to the given point.
 func isNearestFusionProfile(pt []float64, fi int, profiles []cadir.ExtrudeProfileInfo) bool {
@@ -2118,7 +2040,7 @@ func isNearestFusionProfile(pt []float64, fi int, profiles []cadir.ExtrudeProfil
 // compileMultiBodyExtrude performs a join/cut extrude whose result spans several
 // disjoint bodies. Profiles and participant bodies are assigned to whichever result
 // body they overlap (by bounding box) rather than by name or coordinate thresholds.
-func (c *Compiler) compileMultiBodyExtrude(e cadir.ExtrudeFeature, _ []profCentroid, profs []int, sketchRef interface{}) bool {
+func (c *Compiler) compileMultiBodyExtrude(e cadir.ExtrudeFeature, profs []int, sketchRef interface{}) bool {
 	insp, err := c.client.CallTool("inspect_design", map[string]interface{}{})
 	if err != nil {
 		return false
