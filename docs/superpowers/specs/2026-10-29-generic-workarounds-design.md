@@ -141,3 +141,31 @@ This single mechanism replaces:
 1. `go build ./...`, `go test ./...` pass, including the literal-gate test.
 2. TestDrive replay: all verification checkpoints pass.
 3. Second-design replay completes with no design-specific code paths involved.
+
+## Addendum (2026-10-30, live regression findings)
+
+Live replay against TestDrive Fifi Xiao **v30** (the design advanced past v29 during
+development) validated and corrected the design:
+
+- **Universal coordinate snapping (Part 2, item 1) was reverted.** Snapping collapsed
+  ulp-separated duplicate curves, corrupting SolidCraft's sketch region detection
+  (hairline profile loops became unclosed; mega-regions appeared). Raw coordinates pass
+  all steps including the former `usbc` boolean cases.
+- **Universal repeated-curve-ID profile skip (Part 2, item 3) was reverted entirely.**
+  Live data showed legitimate large regions carry repeated boundary curve IDs; the
+  area-ratio gates and the claim test make the skip unnecessary.
+- **Temporary-merge detection was added (extends Part 1.C).** A join-extrude participant
+  whose pre-merge geometry reappears via a later volume-conserving body split (Fusion
+  merges it now and separates it again later) is *not* merged in SolidCraft. This keeps
+  such a body separate so later features (e.g. the mirror) can target it, and lets
+  per-step reconciliation apply Fusion's renames — reproducing the old `Extrude60`
+  rename chain and mirror heuristics purely from snapshots.
+- **Result:** 85/96 checkpoints match on v30, including all formerly name-keyed steps
+  (Extrude56/57/59/60, Mirror1). Step 86 (bottom covers, `Extrude63`) diverges
+  identically in the pre-refactor binary: the v30 design added spline-heavy geometry to
+  the `bottom_covers` sketch that SolidCraft's region tracer cannot partition (it yields
+  ~9573 mm² mega-regions instead of Fusion's 1239 mm² cover profiles). This is a
+  pre-existing geometric limitation of the translator for v30, unrelated to the
+  workaround refactor.
+- The `--skip-steps` flag (Part 3) is implemented and available for diagnosing issues
+  such as the step-86 limitation.
