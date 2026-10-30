@@ -41,3 +41,60 @@ func TestCircleArcIntersections(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitArcsAtCircles_SplitsCrossingArc(t *testing.T) {
+	// Circle centered at origin, radius 5. Arc centered at (5,0), radius 5,
+	// running CCW from (10,0) through (5,5) to (0,0). The circle intersects
+	// the arc at (2.5, 4.33) (inside the span) and (2.5,-4.33) (outside).
+	curves := []Curve{
+		{ID: "c1", Type: CurveTypeCircle, Center: Point2D{X: 0, Y: 0}, Radius: 5},
+		{ID: "a1", Type: CurveTypeArc, Center: Point2D{X: 5, Y: 0}, Radius: 5,
+			Start: Point2D{X: 10, Y: 0}, End: Point2D{X: 0, Y: 0}, MidPoint: Point2D{X: 5, Y: 5}},
+	}
+	out := SplitArcsAtCircles(curves)
+	if len(out) != 3 { // 1 circle + 2 sub-arcs
+		t.Fatalf("expected 3 curves, got %d", len(out))
+	}
+	sub1, sub2 := out[1], out[2]
+	if Distance2D(sub1.Start, Point2D{X: 10, Y: 0}) > 1e-6 {
+		t.Fatalf("first sub-arc must start at (10,0), got %+v", sub1.Start)
+	}
+	if Distance2D(sub1.End, Point2D{X: 2.5, Y: 4.330127}) > 1e-4 {
+		t.Fatalf("first sub-arc must end at the intersection, got %+v", sub1.End)
+	}
+	if Distance2D(sub2.Start, Point2D{X: 2.5, Y: 4.330127}) > 1e-4 ||
+		Distance2D(sub2.End, Point2D{X: 0, Y: 0}) > 1e-6 {
+		t.Fatalf("second sub-arc endpoints wrong: %+v -> %+v", sub2.Start, sub2.End)
+	}
+	// Sub-arc midpoints must re-normalize to themselves (CCW preserved).
+	ns, ne := NormalizeArc(sub1.Center, sub1.Start, sub1.End, sub1.MidPoint)
+	if Distance2D(ns, sub1.Start) > 1e-6 || Distance2D(ne, sub1.End) > 1e-6 {
+		t.Fatalf("sub-arc midpoint orientation broken: %+v -> %+v", ns, ne)
+	}
+}
+
+func TestSplitArcsAtCircles_LeavesDisjointArcAlone(t *testing.T) {
+	curves := []Curve{
+		{ID: "c1", Type: CurveTypeCircle, Center: Point2D{X: 0, Y: 0}, Radius: 5},
+		{ID: "a1", Type: CurveTypeArc, Center: Point2D{X: 50, Y: 0}, Radius: 5,
+			Start: Point2D{X: 55, Y: 0}, End: Point2D{X: 45, Y: 0}, MidPoint: Point2D{X: 50, Y: 5}},
+	}
+	out := SplitArcsAtCircles(curves)
+	if len(out) != 2 || out[1].ID != "a1" {
+		t.Fatalf("disjoint arc must pass through unchanged, got %d curves", len(out))
+	}
+}
+
+func TestSplitArcsAtCircles_EndpointTouchDoesNotSplit(t *testing.T) {
+	// Circle radius 5 at origin; arc from (5,0) to (0,5) centered at origin:
+	// its endpoints lie ON the circle, so no interior split occurs.
+	curves := []Curve{
+		{ID: "c1", Type: CurveTypeCircle, Center: Point2D{X: 0, Y: 0}, Radius: 5},
+		{ID: "a1", Type: CurveTypeArc, Center: Point2D{X: 0, Y: 0}, Radius: 5,
+			Start: Point2D{X: 5, Y: 0}, End: Point2D{X: 0, Y: 5}, MidPoint: Point2D{X: 3.5355339, Y: 3.5355339}},
+	}
+	out := SplitArcsAtCircles(curves)
+	if len(out) != 2 {
+		t.Fatalf("arc touching circle only at endpoints must not split, got %d curves", len(out))
+	}
+}

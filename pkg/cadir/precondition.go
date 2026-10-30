@@ -2,6 +2,7 @@ package cadir
 
 import (
 	"math"
+	"sort"
 )
 
 // NormalizeArc ensures the arc points [start, end] follow SolidCraft's counter-clockwise (CCW)
@@ -100,4 +101,106 @@ func CircleArcIntersections(circleRadius float64, arcCenter Point2D, arcRadius f
 		}
 	}
 	return pts
+}
+
+// SplitArcsAtCircles returns the curve list with every arc split at its
+// intersections with any circle in the same sketch. Only intersections lying
+// strictly inside the arc's CCW span and away from its endpoints cause a
+// split; arcs without such intersections pass through unchanged. Sub-arc
+// midpoints are recomputed so NormalizeArc keeps each sub-arc's orientation.
+func SplitArcsAtCircles(curves []Curve) []Curve {
+	var circles []Curve
+	for _, c := range curves {
+		if c.Type == CurveTypeCircle {
+			circles = append(circles, c)
+		}
+	}
+	if len(circles) == 0 {
+		return curves
+	}
+	out := make([]Curve, 0, len(curves))
+	for _, c := range curves {
+		if c.Type != CurveTypeArc {
+			out = append(out, c)
+			continue
+		}
+		start, end := NormalizeArc(c.Center, c.Start, c.End, c.MidPoint)
+		angStart := math.Atan2(start.Y-c.Center.Y, start.X-c.Center.X)
+		angEnd := math.Atan2(end.Y-c.Center.Y, end.X-c.Center.X)
+		if angStart < 0 {
+			angStart += 2 * math.Pi
+		}
+		if angEnd < 0 {
+			angEnd += 2 * math.Pi
+		}
+		span := angEnd - angStart
+		if span < 0 {
+			span += 2 * math.Pi
+		}
+		type splitPoint struct {
+			rel float64
+			pt  Point2D
+		}
+		var splits []splitPoint
+		for _, circle := range circles {
+			// Translate so the circle sits at the origin, as the solver expects.
+			shifted := Point2D{X: c.Center.X - circle.Center.X, Y: c.Center.Y - circle.Center.Y}
+			for _, p := range CircleArcIntersections(circle.Radius, shifted, c.Radius) {
+				world := Point2D{X: p.X + circle.Center.X, Y: p.Y + circle.Center.Y}
+				if Distance2D(world, start) < 0.05 || Distance2D(world, end) < 0.05 {
+					continue
+				}
+				ang := math.Atan2(world.Y-c.Center.Y, world.X-c.Center.X)
+				if ang < 0 {
+					ang += 2 * math.Pi
+				}
+				rel := ang - angStart
+				if rel < 0 {
+					rel += 2 * math.Pi
+				}
+				if rel <= 1e-9 || rel >= span-1e-9 {
+					continue
+				}
+				dup := false
+				for _, s := range splits {
+					if Distance2D(s.pt, world) < 0.05 {
+						dup = true
+						break
+					}
+				}
+				if !dup {
+					splits = append(splits, splitPoint{rel: rel, pt: world})
+				}
+			}
+		}
+		if len(splits) == 0 {
+			out = append(out, c)
+			continue
+		}
+		sort.Slice(splits, func(i, j int) bool { return splits[i].rel < splits[j].rel })
+		bounds := make([]Point2D, 0, len(splits)+2)
+		bounds = append(bounds, start)
+		for _, s := range splits {
+			bounds = append(bounds, s.pt)
+		}
+		bounds = append(bounds, end)
+		rels := make([]float64, 0, len(bounds))
+		rels = append(rels, 0)
+		for _, s := range splits {
+			rels = append(rels, s.rel)
+		}
+		rels = append(rels, span)
+		for i := 0; i+1 < len(bounds); i++ {
+			sub := c
+			sub.Start = bounds[i]
+			sub.End = bounds[i+1]
+			midAng := angStart + (rels[i]+rels[i+1])/2
+			sub.MidPoint = Point2D{
+				X: c.Center.X + c.Radius*math.Cos(midAng),
+				Y: c.Center.Y + c.Radius*math.Sin(midAng),
+			}
+			out = append(out, sub)
+		}
+	}
+	return out
 }
