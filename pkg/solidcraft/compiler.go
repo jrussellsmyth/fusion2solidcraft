@@ -20,6 +20,7 @@ type CompileOptions struct {
 	StopOnDivergence bool
 	Interactive      bool
 	StepFrom         int
+	SkipSteps        map[int]bool
 }
 
 // Compiler translates CAD-IR models into SolidCraft executable commands.
@@ -188,6 +189,88 @@ func (c *Compiler) hydrateStateFromDesign(model *cadir.Model, startStep int) {
 	}
 }
 
+// reconcileBodies aligns SolidCraft body names with Fusion's post-step state:
+// bodies are matched geometrically (volume + bbox center) and mismatched names
+// are renamed with collision-safe ordering so IR body-name references written
+// at this timeline point resolve correctly afterwards.
+func (c *Compiler) reconcileBodies(expected []cadir.BodySnapshot) error {
+	if len(expected) == 0 {
+		return nil
+	}
+	actual, err := c.inspectBodies()
+	if err != nil {
+		return err
+	}
+	if len(actual) == 0 {
+		return nil
+	}
+	matches := cadir.MatchBodies(actual, expected)
+	matchedExpected := make(map[int]bool, len(matches))
+	desired := make(map[string]string, len(matches))
+	for ai, ei := range matches {
+		matchedExpected[ei] = true
+		if actual[ai].Name != expected[ei].Name {
+			desired[actual[ai].Name] = expected[ei].Name
+		}
+	}
+	for ei, ex := range expected {
+		if !matchedExpected[ei] {
+			fmt.Printf("Reconcile notice: Fusion body %q (%.1f mm3) has no SolidCraft counterpart\n", ex.Name, ex.VolumeMM3)
+		}
+	}
+	if len(desired) == 0 {
+		return nil
+	}
+	names := make([]string, 0, len(actual))
+	for _, b := range actual {
+		names = append(names, b.Name)
+	}
+	for _, mv := range cadir.PlanRenames(names, desired) {
+		if err := c.renameBody(mv[0], mv[1]); err != nil {
+			fmt.Printf("Notice: reconcile rename %s -> %s failed: %v\n", mv[0], mv[1], err)
+			continue
+		}
+		fmt.Printf("Reconcile: renamed body %s -> %s to match Fusion state\n", mv[0], mv[1])
+	}
+	return nil
+}
+
+// inspectBodies reads the current SolidCraft bodies as geometric snapshots.
+func (c *Compiler) inspectBodies() ([]cadir.BodySnapshot, error) {
+	inspOut, err := c.client.CallTool("inspect_design", map[string]interface{}{})
+	if err != nil {
+		return nil, err
+	}
+	var design struct {
+		Bodies []struct {
+			Name         string    `json:"name"`
+			VolumeMM3    float64   `json:"volume_mm3"`
+			AreaMM2      float64   `json:"area_mm2"`
+			CenterOfMass []float64 `json:"center_of_mass"`
+			BBox         struct {
+				Min []float64 `json:"min"`
+				Max []float64 `json:"max"`
+			} `json:"bbox"`
+		} `json:"bodies"`
+	}
+	if err := json.Unmarshal([]byte(inspOut), &design); err != nil {
+		return nil, err
+	}
+	out := make([]cadir.BodySnapshot, 0, len(design.Bodies))
+	for _, b := range design.Bodies {
+		snap := cadir.BodySnapshot{Name: b.Name, VolumeMM3: b.VolumeMM3, AreaMM2: b.AreaMM2}
+		if len(b.CenterOfMass) >= 3 {
+			snap.Centroid = cadir.Point3D{X: b.CenterOfMass[0], Y: b.CenterOfMass[1], Z: b.CenterOfMass[2]}
+		}
+		if len(b.BBox.Min) >= 3 && len(b.BBox.Max) >= 3 {
+			snap.BBoxMin = cadir.Point3D{X: b.BBox.Min[0], Y: b.BBox.Min[1], Z: b.BBox.Min[2]}
+			snap.BBoxMax = cadir.Point3D{X: b.BBox.Max[0], Y: b.BBox.Max[1], Z: b.BBox.Max[2]}
+		}
+		out = append(out, snap)
+	}
+	return out, nil
+}
+
 // CompileModel transforms the full timeline into SolidCraft commands and replays it step-by-step.
 func (c *Compiler) CompileModel(model *cadir.Model, verify bool, untilStep int, stopOnDivergence bool) ([]cadir.ComparisonResult, error) {
 	return c.CompileModelWithOptions(model, CompileOptions{
@@ -215,6 +298,7 @@ func (c *Compiler) CompileModelWithOptions(model *cadir.Model, opts CompileOptio
 		stdinReader = bufio.NewReader(os.Stdin)
 	}
 
+	skipOccurred := false
 	for _, step := range model.Timeline {
 		if opts.StartStep > 0 && step.Index < opts.StartStep {
 			continue
@@ -222,6 +306,12 @@ func (c *Compiler) CompileModelWithOptions(model *cadir.Model, opts CompileOptio
 		if opts.UntilStep >= 0 && step.Index > opts.UntilStep {
 			fmt.Printf("\nReached target step %d (--until-step %d), pausing playback.\n", step.Index-1, opts.UntilStep)
 			break
+		}
+
+		if opts.SkipSteps[step.Index] {
+			fmt.Printf("Skipping step %d (%s) as requested (--skip-steps); body reconciliation disabled for the rest of this run.\n", step.Index, step.Name)
+			skipOccurred = true
+			continue
 		}
 
 		if opts.StepFrom >= 0 && step.Index >= opts.StepFrom {
@@ -322,6 +412,12 @@ func (c *Compiler) CompileModelWithOptions(model *cadir.Model, opts CompileOptio
 		case "plane":
 			if step.Plane != nil {
 				c.planes[step.Name] = *step.Plane
+			}
+		}
+
+		if !skipOccurred && len(step.BodySnapshot) > 0 {
+			if err := c.reconcileBodies(step.BodySnapshot); err != nil {
+				fmt.Printf("Notice: body reconciliation at step %d failed: %v\n", step.Index, err)
 			}
 		}
 
