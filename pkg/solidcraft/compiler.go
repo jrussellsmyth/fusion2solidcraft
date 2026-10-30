@@ -32,6 +32,8 @@ type Compiler struct {
 	sketchPlaneByName map[string][3][3]float64 // name -> {origin, xDir, yDir}
 	syntheticSeq      int
 	usedFeatureName   map[string]int
+	model             *cadir.Model // active model during CompileModelWithOptions (snapshot lookahead)
+	curStep           int          // index of the timeline step currently being compiled
 }
 
 // NewCompiler creates a new Compiler.
@@ -306,7 +308,9 @@ func (c *Compiler) CompileModelWithOptions(model *cadir.Model, opts CompileOptio
 	}
 
 	skipOccurred := false
+	c.model = model
 	for _, step := range model.Timeline {
+		c.curStep = step.Index
 		if opts.StartStep > 0 && step.Index < opts.StartStep {
 			continue
 		}
@@ -450,12 +454,6 @@ func (c *Compiler) CompileModelWithOptions(model *cadir.Model, opts CompileOptio
 	return results, nil
 }
 
-// snapCoord snaps a sketch coordinate to a 1e-4 mm grid so that coincident
-// and tangential geometry is exactly coincident for the SolidCraft kernel.
-func snapCoord(v float64) float64 {
-	return math.Round(v*1e4) / 1e4
-}
-
 func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 	var cmds []Command
 
@@ -486,8 +484,8 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 			cmds = append(cmds, Command{
 				ID: "sketch.circle.center",
 				Params: SketchCircleCenterParams{
-					Center:       []float64{snapCoord(curve.Center.X), snapCoord(curve.Center.Y)},
-					Radius:       snapCoord(curve.Radius),
+					Center:       []float64{curve.Center.X, curve.Center.Y},
+					Radius:       curve.Radius,
 					Construction: curve.Construction,
 				},
 			})
@@ -501,8 +499,8 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 				ID: "sketch.line",
 				Params: SketchLineParams{
 					Points: [][]float64{
-						{snapCoord(curve.Start.X), snapCoord(curve.Start.Y)},
-						{snapCoord(curve.End.X), snapCoord(curve.End.Y)},
+						{curve.Start.X, curve.Start.Y},
+						{curve.End.X, curve.End.Y},
 					},
 					Construction: curve.Construction,
 				},
@@ -517,9 +515,9 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 			cmds = append(cmds, Command{
 				ID: "sketch.arc.center_point",
 				Params: SketchArcCenterPointParams{
-					Center:       []float64{snapCoord(curve.Center.X), snapCoord(curve.Center.Y)},
-					Start:        []float64{snapCoord(start.X), snapCoord(start.Y)},
-					End:          []float64{snapCoord(end.X), snapCoord(end.Y)},
+					Center:       []float64{curve.Center.X, curve.Center.Y},
+					Start:        []float64{start.X, start.Y},
+					End:          []float64{end.X, end.Y},
 					Construction: curve.Construction,
 				},
 			})
@@ -533,7 +531,7 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 			if len(curve.ControlPoints) >= 2 && (curve.Degree == 5 || curve.Degree == 3) {
 				var cpts [][]float64
 				for _, pt := range curve.ControlPoints {
-					cpts = append(cpts, []float64{snapCoord(pt.X), snapCoord(pt.Y)})
+					cpts = append(cpts, []float64{pt.X, pt.Y})
 				}
 				cmdID := "sketch.spline.control_point"
 				if curve.Degree == 5 {
@@ -551,7 +549,7 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 			}
 			var pts [][]float64
 			for _, pt := range curve.Points {
-				pts = append(pts, []float64{snapCoord(pt.X), snapCoord(pt.Y)})
+				pts = append(pts, []float64{pt.X, pt.Y})
 			}
 			if len(pts) >= 2 {
 				cmds = append(cmds, Command{
@@ -686,7 +684,10 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, snap []cadir.B
 		return
 	}
 	// Fusion's own post-step snapshot says which participants it actually
-	// consumed (merged away): exactly those absent from the snapshot.
+	// consumed (merged away): exactly those absent from the snapshot. A merge
+	// is skipped when it is temporary: the participant reappears (geometrically)
+	// in a later snapshot, meaning a later feature separates it again, and
+	// keeping it separate lets those features target it directly.
 	if snap != nil {
 		present := make(map[string]bool, len(snap))
 		for _, b := range snap {
@@ -694,9 +695,14 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, snap []cadir.B
 		}
 		var consumed []string
 		for _, pb := range e.ParticipantBodies {
-			if !present[pb] {
-				consumed = append(consumed, pb)
+			if present[pb] {
+				continue
 			}
+			if c.mergeIsTemporary(pb) {
+				fmt.Printf("Merge skip: %s is consumed now but separates again later; keeping it a separate body\n", pb)
+				continue
+			}
+			consumed = append(consumed, pb)
 		}
 		if len(consumed) == 0 {
 			return
@@ -820,6 +826,89 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, snap []cadir.B
 			}
 		}
 	}
+}
+
+// mergeIsTemporary reports whether Fusion merges this participant only
+// temporarily: a later step splits a body into two with conserved volume and
+// one piece geometrically matching the participant's pre-merge body. Such
+// merges are skipped so the participant stays a separate body that the later
+// feature can target directly.
+func (c *Compiler) mergeIsTemporary(pb string) bool {
+	if c.model == nil {
+		return false
+	}
+	var pre *cadir.BodySnapshot
+	for i := c.curStep - 1; i >= 0 && pre == nil; i-- {
+		for _, b := range c.model.Timeline[i].BodySnapshot {
+			if b.Name == pb {
+				bb := b
+				pre = &bb
+				break
+			}
+		}
+	}
+	if pre == nil {
+		return false
+	}
+	preVol := pre.VolumeMM3
+	preCenter := [3]float64{
+		(pre.BBoxMin.X + pre.BBoxMax.X) / 2,
+		(pre.BBoxMin.Y + pre.BBoxMax.Y) / 2,
+		(pre.BBoxMin.Z + pre.BBoxMax.Z) / 2,
+	}
+	matchesParticipant := func(b cadir.BodySnapshot) bool {
+		rel := math.Abs(b.VolumeMM3-preVol) / math.Max(math.Abs(preVol), 1e-9)
+		center := [3]float64{
+			(b.BBoxMin.X + b.BBoxMax.X) / 2,
+			(b.BBoxMin.Y + b.BBoxMax.Y) / 2,
+			(b.BBoxMin.Z + b.BBoxMax.Z) / 2,
+		}
+		d := math.Sqrt((center[0]-preCenter[0])*(center[0]-preCenter[0]) +
+			(center[1]-preCenter[1])*(center[1]-preCenter[1]) +
+			(center[2]-preCenter[2])*(center[2]-preCenter[2]))
+		return rel <= 0.05 && d <= 1.0
+	}
+	snapVolume := func(b cadir.BodySnapshot) float64 { return b.VolumeMM3 }
+	snapCenter := func(b cadir.BodySnapshot) [3]float64 {
+		return [3]float64{
+			(b.BBoxMin.X + b.BBoxMax.X) / 2,
+			(b.BBoxMin.Y + b.BBoxMax.Y) / 2,
+			(b.BBoxMin.Z + b.BBoxMax.Z) / 2,
+		}
+	}
+	for s := c.curStep + 1; s < len(c.model.Timeline); s++ {
+		cur := c.model.Timeline[s].BodySnapshot
+		if len(cur) == 0 || s == 0 {
+			continue
+		}
+		prev := c.model.Timeline[s-1].BodySnapshot
+		for _, p := range cur {
+			if !matchesParticipant(p) {
+				continue
+			}
+			// Split signature: some previous-step body M has a volume equal to
+			// P plus another current-step body T (within 5%), i.e. M was split
+			// into P and T.
+			for _, t := range cur {
+				if t.Name == p.Name {
+					continue
+				}
+				sum := snapVolume(p) + snapVolume(t)
+				for _, m := range prev {
+					relSum := math.Abs(snapVolume(m)-sum) / math.Max(snapVolume(m), 1e-9)
+					if relSum > 0.05 {
+						continue
+					}
+					mc, tc := snapCenter(m), snapCenter(t)
+					d := math.Sqrt((mc[0]-tc[0])*(mc[0]-tc[0]) + (mc[1]-tc[1])*(mc[1]-tc[1]) + (mc[2]-tc[2])*(mc[2]-tc[2]))
+					if d <= 2.0 {
+						return true
+					}
+				}
+			}
+		}
+	}
+	return false
 }
 
 func (c *Compiler) checkAndRenameBodies(execResp string, desiredNames ...string) {
@@ -955,21 +1044,6 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature, snap []cadir
 				bestArea := 0.0
 				bestDist := 1e9
 				for _, sp := range scProfiles {
-					// Skip degenerate profiles: a valid region boundary never repeats a curve.
-					{
-						curveCounts := make(map[string]int)
-						degenerate := false
-						for _, cid := range sp.Curves {
-							curveCounts[cid]++
-							if curveCounts[cid] > 1 {
-								degenerate = true
-								break
-							}
-						}
-						if degenerate {
-							continue
-						}
-					}
 					if len(sp.CentroidSketch) >= 2 {
 						if fp.AreaMM2 > 0 {
 							ratio := sp.AreaMM2 / fp.AreaMM2
@@ -1082,21 +1156,6 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature, snap []cadir
 				bestArea := 0.0
 				bestDist := 1e9
 				for _, sp := range scProfiles {
-					// Skip degenerate profiles: a valid region boundary never repeats a curve.
-					{
-						curveCounts := make(map[string]int)
-						degenerate := false
-						for _, cid := range sp.Curves {
-							curveCounts[cid]++
-							if curveCounts[cid] > 1 {
-								degenerate = true
-								break
-							}
-						}
-						if degenerate {
-							continue
-						}
-					}
 					if len(sp.CentroidSketch) >= 2 {
 						dx := sp.CentroidSketch[0] - fCentroid.X
 						dy := sp.CentroidSketch[1] - fCentroid.Y
