@@ -5,6 +5,8 @@ import (
 	"flag"
 	"fmt"
 	"os"
+	"strconv"
+	"strings"
 
 	"github.com/jrussell/fusion2solidcraft/pkg/cadir"
 	"github.com/jrussell/fusion2solidcraft/pkg/fusion"
@@ -22,10 +24,17 @@ func main() {
 	endStep := flag.Int("end-step", -1, "Alias for -until-step")
 	stepMode := flag.Bool("step", false, "Interactive step-by-step mode (prompts 'n' for next, 'c' to continue, 'q' to quit before each feature)")
 	stepFrom := flag.Int("step-from", -1, "Run automatically up to this step index, then start interactive stepping controls ('n'/'c'/'q')")
+	skipSteps := flag.String("skip-steps", "", "Comma-separated step indices or ranges (e.g. 51,52 or 40-45) to skip without executing (diagnostics)")
 	findDivergence := flag.Bool("find-divergence", false, "Halt immediately at the first step where SolidCraft diverges from Fusion")
 	savePath := flag.String("save", "", "Path to save .solidcraft file")
 	jsonOut := flag.String("json-out", "", "Export CAD-IR JSON to this file")
 	flag.Parse()
+
+	skipSet, err := parseSkipSteps(*skipSteps)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "Invalid --skip-steps: %v\n", err)
+		os.Exit(1)
+	}
 
 	effectiveStart := *startStep
 	if *fromStep > 0 && effectiveStart == 0 {
@@ -135,6 +144,7 @@ func main() {
 		StopOnDivergence: *findDivergence,
 		Interactive:      *stepMode,
 		StepFrom:         *stepFrom,
+		SkipSteps:        skipSet,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error during compilation: %v\n", err)
@@ -174,4 +184,37 @@ func main() {
 	}
 
 	fmt.Println("\nTranslation complete! The model is active in your SolidCraft session.")
+}
+
+// parseSkipSteps parses a comma-separated list of step indices and inclusive
+// a-b ranges into a set.
+func parseSkipSteps(spec string) (map[int]bool, error) {
+	out := map[int]bool{}
+	spec = strings.TrimSpace(spec)
+	if spec == "" {
+		return out, nil
+	}
+	for _, tok := range strings.Split(spec, ",") {
+		tok = strings.TrimSpace(tok)
+		if tok == "" {
+			continue
+		}
+		if lo, hi, found := strings.Cut(tok, "-"); found {
+			a, errLo := strconv.Atoi(strings.TrimSpace(lo))
+			b, errHi := strconv.Atoi(strings.TrimSpace(hi))
+			if errLo != nil || errHi != nil || b < a {
+				return nil, fmt.Errorf("bad range %q", tok)
+			}
+			for i := a; i <= b; i++ {
+				out[i] = true
+			}
+			continue
+		}
+		n, err := strconv.Atoi(tok)
+		if err != nil || n < 0 {
+			return nil, fmt.Errorf("bad index %q", tok)
+		}
+		out[n] = true
+	}
+	return out, nil
 }
