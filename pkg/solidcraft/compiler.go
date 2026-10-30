@@ -885,13 +885,13 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 
 		// 1. Try rich Profiles matching
 		if len(e.Profiles) > 0 {
-			for _, fp := range e.Profiles {
+			for fi, fp := range e.Profiles {
 				bestIdx := -1
 				bestArea := 0.0
 				bestDist := 1e9
 				for _, sp := range scProfiles {
-					// Skip degenerate profiles in connectors where any curve ID is repeated
-					if e.SketchName == "connectors" {
+					// Skip degenerate profiles: a valid region boundary never repeats a curve.
+					{
 						curveCounts := make(map[string]int)
 						degenerate := false
 						for _, cid := range sp.Curves {
@@ -922,7 +922,11 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 						}
 					}
 				}
-				if (bestDist < 2.0 || (e.SketchName == "Sketch1" && bestDist < 2.5)) && bestIdx >= 0 {
+				// Tolerance scales with profile size: small profiles (e.g. keyswitch
+				// sockets on a fine grid) allow a few mm of centroid discrepancy,
+				// large ones stay near the 2 mm floor, capped for safety.
+				tol := math.Min(2.0+math.Sqrt(fp.AreaMM2), 6.0)
+				if bestDist < tol && bestIdx >= 0 {
 					found := false
 					for _, m := range matched {
 						if m.Index == bestIdx {
@@ -965,11 +969,18 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 							}
 						}
 					}
-				} else if fp.BBoxMin != nil && fp.BBoxMax != nil && fp.AreaMM2 > 300.0 && e.SketchName != "bottom_covers" {
+				} else if fp.BBoxMin != nil && fp.BBoxMax != nil && fp.AreaMM2 > 300.0 {
 					// Compound profile: match all sub-profiles inside bbox
 					tol := 0.5
 					for _, sp := range scProfiles {
 						if len(sp.CentroidSketch) >= 2 {
+							// Claim test: a sub-profile belongs to the nearest Fusion
+							// profile only; this prevents regions of adjacent compound
+							// profiles (e.g. mirrored pairs in one sketch) from being
+							// absorbed by the wrong one.
+							if !isNearestFusionProfile(sp.CentroidSketch, fi, e.Profiles) {
+								continue
+							}
 							cx := sp.CentroidSketch[0]
 							cy := sp.CentroidSketch[1]
 							if cx >= fp.BBoxMin.X-tol && cx <= fp.BBoxMax.X+tol &&
@@ -1006,8 +1017,8 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature) error {
 				bestArea := 0.0
 				bestDist := 1e9
 				for _, sp := range scProfiles {
-					// Skip degenerate profiles in connectors where any curve ID is repeated
-					if e.SketchName == "connectors" {
+					// Skip degenerate profiles: a valid region boundary never repeats a curve.
+					{
 						curveCounts := make(map[string]int)
 						degenerate := false
 						for _, cid := range sp.Curves {
@@ -1877,6 +1888,24 @@ type profCentroid struct {
 }
 
 func scProfilesCentroids[T any](ps []T) []profCentroid { return nil }
+
+// isNearestFusionProfile reports whether the Fusion profile at index fi is the
+// closest Fusion profile (by sketch-space centroid) to the given point.
+func isNearestFusionProfile(pt []float64, fi int, profiles []cadir.ExtrudeProfileInfo) bool {
+	if len(pt) < 2 || fi < 0 || fi >= len(profiles) {
+		return false
+	}
+	best := -1
+	bestDist := math.MaxFloat64
+	for i, p := range profiles {
+		d := math.Hypot(p.Centroid.X-pt[0], p.Centroid.Y-pt[1])
+		if d < bestDist {
+			bestDist = d
+			best = i
+		}
+	}
+	return best == fi
+}
 
 // compileMultiBodyExtrude performs a join/cut extrude whose result spans several
 // disjoint bodies. Profiles and participant bodies are assigned to whichever result
