@@ -1207,7 +1207,34 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature, snap []cadir
 		if len(e.ParticipantBodies) > 0 {
 			sourceList = e.ParticipantBodies
 		}
+		// A join must not target a participant that Fusion consumes now but
+		// separates again later (a temporary merge): joining it would fuse it
+		// into the target, and the later split that restores Fusion's state
+		// cannot separate fused bodies in SolidCraft. Keep such a body
+		// untouched; the later split restores it via reconciliation.
+		var temporary []string
+		if e.Operation == "join" && snap != nil {
+			present := make(map[string]bool, len(snap))
+			for _, b := range snap {
+				present[b.Name] = true
+			}
+			for _, rb := range sourceList {
+				if !present[rb] && c.mergeIsTemporary(rb) {
+					temporary = append(temporary, rb)
+				}
+			}
+		}
 		for _, rb := range sourceList {
+			skip := false
+			for _, t := range temporary {
+				if rb == t {
+					skip = true
+					break
+				}
+			}
+			if skip {
+				continue
+			}
 			actual := rb
 			if mapped, ok := c.bodyMap[rb]; ok {
 				actual = mapped
@@ -1216,6 +1243,22 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature, snap []cadir
 				if db.Name == actual {
 					targetBodies = append(targetBodies, actual)
 					break
+				}
+			}
+		}
+		if len(targetBodies) == 0 && len(temporary) > 0 {
+			// Every listed participant was temporary; fall back to targeting
+			// them (old behavior) rather than extruding with no target.
+			for _, rb := range sourceList {
+				actual := rb
+				if mapped, ok := c.bodyMap[rb]; ok {
+					actual = mapped
+				}
+				for _, db := range designData.Bodies {
+					if db.Name == actual {
+						targetBodies = append(targetBodies, actual)
+						break
+					}
 				}
 			}
 		}
@@ -1339,6 +1382,37 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature, snap []cadir
 		}
 	}
 
+	extParams := SolidExtrudeParams{
+		Name:        e.Name,
+		Distance:    e.DistanceMM,
+		StartOffset: e.StartOffsetMM,
+		Operation:   string(e.Operation),
+		Profiles:    profArg,
+		Targets:     targetBodies,
+	}
+	if e.Operation == "new" && len(e.ResultBodies) == 1 && desiredBodyName != "" {
+		extParams.BodyName = desiredBodyName
+	}
+	if sketchRef != nil {
+		extParams.Sketch = sketchRef
+	}
+
+	resp, err := c.client.Execute("solid.extrude", extParams)
+	if err == nil {
+		c.renameFeature(resp, e.Name)
+		if e.Operation == "new" {
+			c.checkAndRenameBodies(resp, e.ResultBodies...)
+		} else {
+			c.checkAndRenameBodies(resp, desiredBodyName)
+		}
+		c.mergeParticipantBodies(e, snap, desiredBodyName)
+		return nil
+	}
+
+	// Fallback for joins when the direct join extrude was rejected: extrude a
+	// new body, then combine it into the targets. Current SolidCraft versions
+	// support extrude-with-join directly, so this path only runs for kernels
+	// that cannot.
 	if e.Operation == "join" && len(targetIndices) > 1 {
 		newParams := SolidExtrudeParams{
 			Name:        e.Name,
@@ -1350,13 +1424,13 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature, snap []cadir
 		if sketchRef != nil {
 			newParams.Sketch = sketchRef
 		}
-		resp, err := c.client.Execute("solid.extrude", newParams)
-		if err == nil {
-			c.renameFeature(resp, e.Name)
+		newResp, newErr := c.client.Execute("solid.extrude", newParams)
+		if newErr == nil {
+			c.renameFeature(newResp, e.Name)
 			var res struct {
 				CreatedBodies []string `json:"created_bodies"`
 			}
-			if json.Unmarshal([]byte(resp), &res) == nil && len(res.CreatedBodies) > 0 {
+			if json.Unmarshal([]byte(newResp), &res) == nil && len(res.CreatedBodies) > 0 {
 				combIdx := 0
 				for _, created := range res.CreatedBodies {
 					combined := false
@@ -1383,33 +1457,6 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature, snap []cadir
 				return nil
 			}
 		}
-	}
-
-	extParams := SolidExtrudeParams{
-		Name:        e.Name,
-		Distance:    e.DistanceMM,
-		StartOffset: e.StartOffsetMM,
-		Operation:   string(e.Operation),
-		Profiles:    profArg,
-		Targets:     targetBodies,
-	}
-	if e.Operation == "new" && len(e.ResultBodies) == 1 && desiredBodyName != "" {
-		extParams.BodyName = desiredBodyName
-	}
-	if sketchRef != nil {
-		extParams.Sketch = sketchRef
-	}
-
-	resp, err := c.client.Execute("solid.extrude", extParams)
-	if err == nil {
-		c.renameFeature(resp, e.Name)
-		if e.Operation == "new" {
-			c.checkAndRenameBodies(resp, e.ResultBodies...)
-		} else {
-			c.checkAndRenameBodies(resp, desiredBodyName)
-		}
-		c.mergeParticipantBodies(e, snap, desiredBodyName)
-		return nil
 	}
 
 	// Smart fallback: if cutting or joining multi-profile failed, try individual profiles sequentially
