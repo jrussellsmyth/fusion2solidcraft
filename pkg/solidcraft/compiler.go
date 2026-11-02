@@ -21,18 +21,26 @@ type CompileOptions struct {
 	Interactive      bool
 	StepFrom         int
 	SkipSteps        map[int]bool
+	// DisableBodyRenames skips all body.rename commands — diagnostic only:
+	// body renames are load-bearing for later body targeting.
+	DisableBodyRenames bool
+	// DisableTimelineRenames skips all timeline.rename commands —
+	// diagnostic: suspected of invalidating internal face references.
+	DisableTimelineRenames bool
 }
 
 // Compiler translates CAD-IR models into SolidCraft executable commands.
 type Compiler struct {
-	client            *Client
-	bodyMap           map[string]string
-	sketchNameToID    map[string]int
-	planes            map[string]cadir.ConstructionPlane
-	sketchPlaneByName map[string][3][3]float64 // name -> {origin, xDir, yDir}
-	usedFeatureName   map[string]int
-	model             *cadir.Model // active model during CompileModelWithOptions (snapshot lookahead)
-	curStep           int          // index of the timeline step currently being compiled
+	client                 *Client
+	bodyMap                map[string]string
+	sketchNameToID         map[string]int
+	planes                 map[string]cadir.ConstructionPlane
+	sketchPlaneByName      map[string][3][3]float64 // name -> {origin, xDir, yDir}
+	usedFeatureName        map[string]int
+	model                  *cadir.Model // active model during CompileModelWithOptions (snapshot lookahead)
+	curStep                int          // index of the timeline step currently being compiled
+	disableBodyRenames     bool
+	disableTimelineRenames bool
 }
 
 // NewCompiler creates a new Compiler.
@@ -48,7 +56,7 @@ func NewCompiler(client *Client) *Compiler {
 }
 
 func (c *Compiler) renameBody(oldName, newName string) error {
-	if oldName == "" || newName == "" || oldName == newName {
+	if oldName == "" || newName == "" || oldName == newName || c.disableBodyRenames {
 		return nil
 	}
 	_, err := c.client.Execute("body.rename", BodyRenameParams{
@@ -68,7 +76,7 @@ func (c *Compiler) renameBody(oldName, newName string) error {
 }
 
 func (c *Compiler) renameFeature(execResp, desiredName string) {
-	if execResp == "" || desiredName == "" {
+	if execResp == "" || desiredName == "" || c.disableTimelineRenames {
 		return
 	}
 	var res struct {
@@ -291,6 +299,8 @@ func (c *Compiler) CompileModel(model *cadir.Model, verify bool, untilStep int, 
 
 // CompileModelWithOptions replays the timeline across [StartStep..UntilStep] with optional interactive stepping.
 func (c *Compiler) CompileModelWithOptions(model *cadir.Model, opts CompileOptions) ([]cadir.ComparisonResult, error) {
+	c.disableBodyRenames = opts.DisableBodyRenames
+	c.disableTimelineRenames = opts.DisableTimelineRenames
 	if opts.StartStep <= 0 {
 		if err := c.client.NewDesign(); err != nil {
 			return nil, fmt.Errorf("failed to reset SolidCraft design: %w", err)
@@ -1409,6 +1419,27 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature, snap []cadir
 		return nil
 	}
 
+	// Raised-tool retry for cuts: when a cutting tool's start face is coplanar
+	// with a curved target surface, SolidCraft's boolean needs an unsupported
+	// touching-faces fallback. Raise the tool's start plane above the surface
+	// and extend the depth by the same amount — the tool volume outside the
+	// target contributes nothing, so the cut result is geometrically identical.
+	if e.Operation == "cut" {
+		for _, raise := range [...]float64{1, 5} {
+			raised := extParams
+			raised.StartOffset = extParams.StartOffset + raise
+			raised.Distance = extParams.Distance - raise
+			rResp, rErr := c.client.Execute("solid.extrude", raised)
+			if rErr == nil {
+				c.renameFeature(rResp, e.Name)
+				c.checkAndRenameBodies(rResp, desiredBodyName)
+				c.mergeParticipantBodies(e, snap, desiredBodyName)
+				return nil
+			}
+			fmt.Printf("Notice: raised-tool cut %s (+%gmm) failed: %v\n", e.Name, raise, rErr)
+		}
+	}
+
 	// Fallback for joins when the direct join extrude was rejected: extrude a
 	// new body, then combine it into the targets. Current SolidCraft versions
 	// support extrude-with-join directly, so this path only runs for kernels
@@ -2282,6 +2313,76 @@ func (c *Compiler) compileMultiBodyExtrude(e cadir.ExtrudeFeature, profs []int, 
 		resp, err := c.client.Execute("solid.extrude", params)
 		if err != nil {
 			fmt.Printf("Notice: extrude %s (%s) could not apply: %v\n", name, t, err)
+			// Recovery ladder for a failed join/cut extrude against this
+			// target. SolidCraft's boolean rejects tools that only touch
+			// curved target faces; a raising of the tool's start plane makes
+			// it strictly intersect (geometry preserved: tool volume outside
+			// the target is inert, and raised cut depth compensates exactly).
+			allTargets := append([]string{t}, side[t]...)
+			done := false
+			if e.Operation == "cut" {
+				for _, raise := range [...]float64{1, 5} {
+					raised := params
+					raised.StartOffset = params.StartOffset + raise
+					raised.Distance = params.Distance - raise
+					rResp, rErr := c.client.Execute("solid.extrude", raised)
+					if rErr == nil {
+						c.renameFeature(rResp, name)
+						c.checkAndRenameBodies(rResp, t)
+						done = true
+						break
+					}
+					fmt.Printf("Notice: raised cut %s (%s, +%gmm) failed: %v\n", name, t, raise, rErr)
+				}
+			}
+			if done {
+				continue
+			}
+			for i, bt := range allTargets {
+				fbName := fmt.Sprintf("Synthetic_Join_%s_%d", e.Name, i+1)
+				raises := []float64{0}
+				if e.Operation == "cut" {
+					raises = []float64{1, 5}
+				}
+				var combineErr error
+				for _, raise := range raises {
+					newParams := SolidExtrudeParams{
+						Name:        fbName,
+						Distance:    e.DistanceMM - raise,
+						StartOffset: e.StartOffsetMM + raise,
+						Operation:   "new",
+						Profiles:    ps,
+						Sketch:      sketchRef,
+					}
+					newResp, newErr := c.client.Execute("solid.extrude", newParams)
+					if newErr == nil {
+						c.renameFeature(newResp, fbName)
+						var res struct {
+							CreatedBodies []string `json:"created_bodies"`
+						}
+						if json.Unmarshal([]byte(newResp), &res) == nil && len(res.CreatedBodies) > 0 {
+							cResp, cErr := c.client.Execute("solid.combine", SolidCombineParams{
+								Target:    bt,
+								Tools:     []string{res.CreatedBodies[0]},
+								Operation: string(e.Operation),
+								KeepTools: false,
+							})
+							if cErr == nil {
+								c.renameFeature(cResp, fbName+"_merge")
+								c.checkAndRenameBodies(cResp, bt)
+								combineErr = nil
+								break
+							}
+							combineErr = cErr
+						}
+					} else {
+						combineErr = newErr
+					}
+				}
+				if combineErr != nil {
+					fmt.Printf("Notice: synthetic combine %s into %s failed: %v\n", fbName, bt, combineErr)
+				}
+			}
 			continue
 		}
 		c.renameFeature(resp, name)

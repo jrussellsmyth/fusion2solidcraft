@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/jrussell/fusion2solidcraft/pkg/cadir"
 )
@@ -175,7 +176,11 @@ func (c *Client) CallTool(name string, args map[string]interface{}) (string, err
 	text := content.Content[0].Text
 	if content.IsError {
 		if strings.Contains(text, "still running:") {
-			for attempt := 0; attempt < 6; attempt++ {
+			// Keep polling `pending` until the engine finishes the enqueued
+			// command. Heavy booleans (e.g. large multi-profile joins) can run
+			// for tens of minutes; poll generously rather than abandoning.
+			for attempt := 0; attempt < 300; attempt++ {
+				time.Sleep(2 * time.Second)
 				pReq := mcpRequest{
 					JSONRPC: "2.0",
 					ID:      c.reqID,
@@ -186,31 +191,38 @@ func (c *Client) CallTool(name string, args map[string]interface{}) (string, err
 					},
 				}
 				c.reqID++
-				if wErr := c.write(pReq); wErr == nil {
-					if pResp, rErr := c.read(); rErr == nil {
-						var pContent toolCallContent
-						if json.Unmarshal(pResp.Result, &pContent) == nil && len(pContent.Content) > 0 {
-							pText := pContent.Content[0].Text
-							if !strings.Contains(pText, `"done":false`) && !strings.Contains(pText, `"done": false`) {
-								var pendingRes struct {
-									Done   bool            `json:"done"`
-									Error  string          `json:"error"`
-									Result json.RawMessage `json:"result"`
-								}
-								if json.Unmarshal([]byte(pText), &pendingRes) == nil && pendingRes.Done {
-									if pendingRes.Error != "" {
-										return "", fmt.Errorf("tool error: %s", pendingRes.Error)
-									}
-									if len(pendingRes.Result) > 0 {
-										return string(pendingRes.Result), nil
-									}
-								}
-								break
-							}
-						}
-					}
+				if wErr := c.write(pReq); wErr != nil {
+					return "", fmt.Errorf("pending poll write failed: %w", wErr)
 				}
+				pResp, rErr := c.read()
+				if rErr != nil {
+					continue
+				}
+				var pContent toolCallContent
+				if json.Unmarshal(pResp.Result, &pContent) != nil || len(pContent.Content) == 0 {
+					continue
+				}
+				pText := pContent.Content[0].Text
+				if pContent.IsError {
+					if strings.Contains(pText, "still running:") {
+						continue
+					}
+					return "", fmt.Errorf("tool error: %s", pText)
+				}
+				var pendingRes struct {
+					Done   bool            `json:"done"`
+					Error  string          `json:"error"`
+					Result json.RawMessage `json:"result"`
+				}
+				if json.Unmarshal([]byte(pText), &pendingRes) == nil && pendingRes.Done {
+					if pendingRes.Error != "" {
+						return "", fmt.Errorf("tool error: %s", pendingRes.Error)
+					}
+					return string(pendingRes.Result), nil
+				}
+				// Ambiguous or still-busy response: keep polling.
 			}
+			return "", fmt.Errorf("tool error: %s (pending polling exhausted after 300 attempts)", text)
 		}
 		return "", fmt.Errorf("tool error: %s", text)
 	}

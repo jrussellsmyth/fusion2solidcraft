@@ -26,6 +26,9 @@ func main() {
 	stepFrom := flag.Int("step-from", -1, "Run automatically up to this step index, then start interactive stepping controls ('n'/'c'/'q')")
 	skipSteps := flag.String("skip-steps", "", "Comma-separated step indices or ranges (e.g. 51,52 or 40-45) to skip without executing (diagnostics)")
 	findDivergence := flag.Bool("find-divergence", false, "Halt immediately at the first step where SolidCraft diverges from Fusion")
+	noRenames := flag.Bool("no-renames", false, "Disable body/timeline renames (diagnostic: renames are load-bearing for targeting)")
+	noBodyRenames := flag.Bool("no-body-renames", false, "Disable body.rename only (diagnostic)")
+	noTimelineRenames := flag.Bool("no-timeline-renames", false, "Disable timeline.rename only (diagnostic)")
 	savePath := flag.String("save", "", "Path to save .solidcraft file")
 	jsonOut := flag.String("json-out", "", "Export CAD-IR JSON to this file")
 	flag.Parse()
@@ -138,13 +141,15 @@ func main() {
 	compiler := solidcraft.NewCompiler(scClient)
 	doVerify := *verify || *findDivergence
 	results, err := compiler.CompileModelWithOptions(model, solidcraft.CompileOptions{
-		Verify:           doVerify,
-		StartStep:        effectiveStart,
-		UntilStep:        effectiveEnd,
-		StopOnDivergence: *findDivergence,
-		Interactive:      *stepMode,
-		StepFrom:         *stepFrom,
-		SkipSteps:        skipSet,
+		Verify:                 doVerify,
+		StartStep:              effectiveStart,
+		UntilStep:              effectiveEnd,
+		StopOnDivergence:       *findDivergence,
+		Interactive:            *stepMode,
+		StepFrom:               *stepFrom,
+		SkipSteps:              skipSet,
+		DisableBodyRenames:     *noRenames || *noBodyRenames,
+		DisableTimelineRenames: *noRenames || *noTimelineRenames,
 	})
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error during compilation: %v\n", err)
