@@ -185,3 +185,20 @@ func TestSeparateIsolatedTangentCircles_LeavesDividingContourAlone(t *testing.T)
 		t.Errorf("expected dividing contour circle to remain at (0, 9), got %v", c.Center)
 	}
 }
+
+func TestBridgeOpenCollinearGaps(t *testing.T) {
+	// Two vertical collinear segments along x = 50:
+	// l1 runs from (50, 40) to (50, 17.3883)
+	// l2 runs from (50, 17.5750) to (50, 15.9750)
+	// Both (50, 17.3883) and (50, 17.5750) are open (degree-1) endpoints separated by 0.1867 mm.
+	curves := []Curve{
+		{ID: "top", Type: CurveTypeLine, Start: Point2D{X: 50, Y: 40}, End: Point2D{X: 60, Y: 40}},
+		{ID: "l1", Type: CurveTypeLine, Start: Point2D{X: 50, Y: 40}, End: Point2D{X: 50, Y: 17.3883}},
+		{ID: "l2", Type: CurveTypeLine, Start: Point2D{X: 50, Y: 17.5750}, End: Point2D{X: 50, Y: 15.9750}},
+		{ID: "bot", Type: CurveTypeLine, Start: Point2D{X: 50, Y: 15.9750}, End: Point2D{X: 60, Y: 15.9750}},
+	}
+	out := BridgeOpenCollinearGaps(curves)
+	if Distance2D(out[1].End, out[2].Start) > 1e-6 {
+		t.Errorf("expected open collinear gap to be bridged, got l1.End=%v and l2.Start=%v", out[1].End, out[2].Start)
+	}
+}

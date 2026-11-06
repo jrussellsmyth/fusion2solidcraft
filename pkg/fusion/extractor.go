@@ -165,6 +165,29 @@ def run(_context: str):
                         "construction": arc.isConstruction
                     })
 
+                if hasattr(sketch.sketchCurves, 'sketchEllipticalArcs'):
+                    for ea_idx in range(sketch.sketchCurves.sketchEllipticalArcs.count):
+                        ea = sketch.sketchCurves.sketchEllipticalArcs.item(ea_idx)
+                        geom = ea.geometry
+                        if abs(geom.majorRadius - geom.minorRadius) < 1e-4:
+                            cp = geom.center
+                            ev = geom.evaluator
+                            p0 = ev.getParameterExtents()[1]
+                            p1 = ev.getParameterExtents()[2]
+                            sp = ev.getPointAtParameter(p0)[1]
+                            ep = ev.getPointAtParameter(p1)[1]
+                            mid = ev.getPointAtParameter((p0 + p1) / 2)[1]
+                            curves.append({
+                                "id": f"ea{ea_idx+1}",
+                                "type": "arc",
+                                "center": {"x": cp.x * 10, "y": cp.y * 10},
+                                "start": {"x": sp.x * 10, "y": sp.y * 10},
+                                "end": {"x": ep.x * 10, "y": ep.y * 10},
+                                "radius": geom.majorRadius * 10,
+                                "mid_point": {"x": mid.x * 10, "y": mid.y * 10},
+                                "construction": bool(ea.isConstruction)
+                            })
+
                 def _is_uniform_clamped(deg, knots):
                     if len(knots) < 2 * (deg + 1):
                         return False
@@ -195,8 +218,8 @@ def run(_context: str):
                             return False
                     return True
 
-                all_splines = []
-                split_spline_entities = set()
+                pc_splines = []
+                pc_len_by_tok = {}
                 for p_idx in range(sketch.profiles.count):
                     prof_item = sketch.profiles.item(p_idx)
                     if prof_item.areaProperties().area * 100 < 0.05:
@@ -207,26 +230,49 @@ def run(_context: str):
                             pc = loop_item.profileCurves.item(c_idx)
                             ent = getattr(pc, 'sketchEntity', None)
                             if ent and 'Spline' in type(ent).__name__:
+                                tok = None
                                 try:
-                                    split_spline_entities.add(ent.entityToken)
+                                    tok = ent.entityToken
+                                    ev_pc = pc.geometry.evaluator
+                                    _, p0_pc, p1_pc = ev_pc.getParameterExtents()
+                                    _, l_pc = ev_pc.getLengthAtParameter(p0_pc, p1_pc)
+                                    _, s_pc = ev_pc.getPointAtParameter(p0_pc)
+                                    _, e_pc = ev_pc.getPointAtParameter(p1_pc)
+                                    ep1_pc = (round(s_pc.x * 10, 2), round(s_pc.y * 10, 2))
+                                    ep2_pc = (round(e_pc.x * 10, 2), round(e_pc.y * 10, 2))
+                                    sig_pc = (min(ep1_pc, ep2_pc), max(ep1_pc, ep2_pc))
+                                    pc_len_by_tok.setdefault(tok, {})[sig_pc] = l_pc * 10.0
                                 except Exception:
                                     pass
-                                all_splines.append(('pc', pc, bool(getattr(ent, 'isConstruction', False))))
+                                pc_splines.append(('pc', pc, bool(getattr(ent, 'isConstruction', False)), tok))
 
-                for s_i in range(sketch.sketchCurves.sketchFittedSplines.count):
-                    spl = sketch.sketchCurves.sketchFittedSplines.item(s_i)
-                    if getattr(spl, 'entityToken', None) not in split_spline_entities:
-                        all_splines.append(('fitted', spl, bool(spl.isConstruction)))
-                if hasattr(sketch.sketchCurves, 'sketchFixedSplines'):
-                    for s_i in range(sketch.sketchCurves.sketchFixedSplines.count):
-                        spl = sketch.sketchCurves.sketchFixedSplines.item(s_i)
-                        if getattr(spl, 'entityToken', None) not in split_spline_entities:
-                            all_splines.append(('fixed', spl, bool(spl.isConstruction)))
-                if hasattr(sketch.sketchCurves, 'sketchControlPointSplines'):
-                    for s_i in range(sketch.sketchCurves.sketchControlPointSplines.count):
-                        spl = sketch.sketchCurves.sketchControlPointSplines.item(s_i)
-                        if getattr(spl, 'entityToken', None) not in split_spline_entities:
-                            all_splines.append(('cp', spl, bool(spl.isConstruction)))
+                split_spline_entities = set()
+                parent_splines = []
+                for s_kind, coll_name in (('fitted', 'sketchFittedSplines'), ('fixed', 'sketchFixedSplines'), ('cp', 'sketchControlPointSplines')):
+                    if not hasattr(sketch.sketchCurves, coll_name):
+                        continue
+                    coll = getattr(sketch.sketchCurves, coll_name)
+                    for s_i in range(coll.count):
+                        spl = coll.item(s_i)
+                        tok = getattr(spl, 'entityToken', None)
+                        full_covered = False
+                        if tok and tok in pc_len_by_tok:
+                            try:
+                                ev_spl = spl.geometry.evaluator
+                                _, p0_spl, p1_spl = ev_spl.getParameterExtents()
+                                _, full_len = ev_spl.getLengthAtParameter(p0_spl, p1_spl)
+                                full_len *= 10.0
+                                cov_len = sum(pc_len_by_tok[tok].values())
+                                if full_len > 0 and cov_len >= 0.9 * full_len:
+                                    full_covered = True
+                            except Exception:
+                                full_covered = True
+                        if full_covered:
+                            split_spline_entities.add(tok)
+                        else:
+                            parent_splines.append((s_kind, spl, bool(spl.isConstruction)))
+
+                all_splines = [(k, pc, ic) for (k, pc, ic, tok) in pc_splines if tok in split_spline_entities] + parent_splines
 
                 seen_spline_sigs = set()
                 s_counter = 0
@@ -239,7 +285,14 @@ def run(_context: str):
                     ev = geom.evaluator
                     _, p0, p1 = ev.getParameterExtents()
                     _, pt_start = ev.getPointAtParameter(p0)
-                    _, pt_mid = ev.getPointAtParameter((p0 + p1) * 0.5)
+                    t_mid = (p0 + p1) * 0.5
+                    try:
+                        _, arc_len = ev.getLengthAtParameter(p0, p1)
+                        if arc_len > 0:
+                            _, t_mid = ev.getParameterAtLength(p0, arc_len * 0.5)
+                    except Exception:
+                        pass
+                    _, pt_mid = ev.getPointAtParameter(t_mid)
                     _, pt_end = ev.getPointAtParameter(p1)
                     ep1 = (round(pt_start.x * 10, 2), round(pt_start.y * 10, 2))
                     ep2 = (round(pt_end.x * 10, 2), round(pt_end.y * 10, 2))
@@ -516,10 +569,48 @@ def run(_context: str):
                                 "area_mm2": props.area * 100,
                                 "centroid": c_dict
                             }
+                            if hasattr(p, 'parentSketch') and p.parentSketch and p.parentSketch.name:
+                                p_info["sketch_name"] = p.parentSketch.name
                             if min_x < 1e8:
                                 p_info["bbox_min"] = {"x": min_x, "y": min_y}
                                 p_info["bbox_max"] = {"x": max_x, "y": max_y}
                             profile_infos.append(p_info)
+
+                    if op_str == "new" and hasattr(ext, 'startFaces') and ext.startFaces and ext.startFaces.count > 0:
+                        for sfi in range(ext.startFaces.count):
+                            sf = ext.startFaces.item(sfi)
+                            sf_bb = sf.boundingBox
+                            if not sf_bb:
+                                continue
+                            sf_area = sf.area * 100.0
+                            sf_c = sf.centroid
+                            sf_min_x, sf_min_y = sf_bb.minPoint.x * 10.0, sf_bb.minPoint.y * 10.0
+                            sf_max_x, sf_max_y = sf_bb.maxPoint.x * 10.0, sf_bb.maxPoint.y * 10.0
+                            in_p = []
+                            for p_inf in profile_infos:
+                                pc = p_inf["centroid"]
+                                if (sf_min_x - 1.0 <= pc["x"] <= sf_max_x + 1.0 and
+                                    sf_min_y - 1.0 <= pc["y"] <= sf_max_y + 1.0):
+                                    in_p.append(p_inf)
+                            sum_a = sum(p_inf["area_mm2"] for p_inf in in_p)
+                            if sf_area - sum_a > 5.0:
+                                rem_a = sf_area - sum_a
+                                sum_ax = sum(p_inf["area_mm2"] * p_inf["centroid"]["x"] for p_inf in in_p)
+                                sum_ay = sum(p_inf["area_mm2"] * p_inf["centroid"]["y"] for p_inf in in_p)
+                                rem_cx = (sf_area * (sf_c.x * 10.0) - sum_ax) / rem_a
+                                rem_cy = (sf_area * (sf_c.y * 10.0) - sum_ay) / rem_a
+                                rem_c = {"x": rem_cx, "y": rem_cy}
+                                centroids.append(rem_c)
+                                rem_info = {
+                                    "index": len(profile_infos),
+                                    "area_mm2": rem_a,
+                                    "centroid": rem_c,
+                                    "bbox_min": {"x": sf_min_x, "y": sf_min_y},
+                                    "bbox_max": {"x": sf_max_x, "y": sf_max_y}
+                                }
+                                if sketch_name:
+                                    rem_info["sketch_name"] = sketch_name
+                                profile_infos.append(rem_info)
                 except Exception:
                     pass
 
