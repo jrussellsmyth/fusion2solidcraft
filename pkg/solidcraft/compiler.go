@@ -473,6 +473,8 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 	// 2. Split arcs at circle intersections so SolidCraft region detection sees the
 	//    same trimmed curve arrangement Fusion used.
 	curves = cadir.SplitArcsAtCircles(curves)
+	// 3. Bridge open collinear micro-gaps between adjacent line segments.
+	curves = cadir.BridgeOpenCollinearGaps(curves)
 
 	// 1. sketch.create
 	plane := s.Plane

@@ -68,11 +68,12 @@ const (
 
 // ExtrudeProfileInfo describes a profile region used by an extrusion.
 type ExtrudeProfileInfo struct {
-	Index    int      `json:"index,omitempty"`
-	AreaMM2  float64  `json:"area_mm2,omitempty"`
-	Centroid Point2D  `json:"centroid"`
-	BBoxMin  *Point2D `json:"bbox_min,omitempty"`
-	BBoxMax  *Point2D `json:"bbox_max,omitempty"`
+	Index      int      `json:"index,omitempty"`
+	AreaMM2    float64  `json:"area_mm2,omitempty"`
+	Centroid   Point2D  `json:"centroid"`
+	BBoxMin    *Point2D `json:"bbox_min,omitempty"`
+	BBoxMax    *Point2D `json:"bbox_max,omitempty"`
+	SketchName string   `json:"sketch_name,omitempty"`
 }
 
 // ExtrudeFeature represents a 3D linear extrusion.

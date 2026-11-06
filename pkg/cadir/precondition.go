@@ -418,6 +418,96 @@ func SeparateIsolatedTangentCircles(curves []Curve) []Curve {
 	return out
 }
 
+// BridgeOpenCollinearGaps detects pairs of non-construction line segments that
+// are collinear and have open (degree-1) endpoints separated by a sub-quarter-mm
+// gap (0.005 mm < gap < 0.25 mm), such as when a projected BRep edge in Fusion
+// falls slightly short of an adjacent collinear segment that Fusion's profile
+// finder still treats as continuous. It snaps the first open endpoint to the
+// second so SolidCraft's exact sketch profile detector closes the loop.
+func BridgeOpenCollinearGaps(curves []Curve) []Curve {
+	out := make([]Curve, len(curves))
+	copy(out, curves)
+
+	var allPts []Point2D
+	for _, c := range out {
+		if c.Construction {
+			continue
+		}
+		switch c.Type {
+		case CurveTypeLine, CurveTypeArc:
+			allPts = append(allPts, c.Start, c.End)
+		case CurveTypeSpline:
+			if len(c.ControlPoints) >= 2 {
+				allPts = append(allPts, c.ControlPoints[0], c.ControlPoints[len(c.ControlPoints)-1])
+			} else if len(c.Points) >= 2 {
+				allPts = append(allPts, c.Points[0], c.Points[len(c.Points)-1])
+			}
+		}
+	}
+
+	isOpen := func(pt Point2D) bool {
+		cnt := 0
+		for _, q := range allPts {
+			if Distance2D(pt, q) < 0.01 {
+				cnt++
+			}
+		}
+		return cnt == 1
+	}
+
+	for i := 0; i < len(out); i++ {
+		if out[i].Construction || out[i].Type != CurveTypeLine {
+			continue
+		}
+		p1, p2 := out[i].Start, out[i].End
+		dx1, dy1 := p2.X-p1.X, p2.Y-p1.Y
+		l1 := math.Hypot(dx1, dy1)
+		if l1 < 1e-4 {
+			continue
+		}
+		for j := i + 1; j < len(out); j++ {
+			if out[j].Construction || out[j].Type != CurveTypeLine {
+				continue
+			}
+			q1, q2 := out[j].Start, out[j].End
+			dx2, dy2 := q2.X-q1.X, q2.Y-q1.Y
+			l2 := math.Hypot(dx2, dy2)
+			if l2 < 1e-4 {
+				continue
+			}
+			if math.Abs(dx1*dy2-dy1*dx2)/(l1*l2) > 1e-3 {
+				continue
+			}
+			if math.Abs((q1.X-p1.X)*dy1-(q1.Y-p1.Y)*dx1)/l1 > 1e-3 {
+				continue
+			}
+			ptsI := [2]*Point2D{&out[i].Start, &out[i].End}
+			ptsJ := [2]Point2D{out[j].Start, out[j].End}
+			bridged := false
+			for _, pi := range ptsI {
+				if !isOpen(*pi) {
+					continue
+				}
+				for _, pj := range ptsJ {
+					if !isOpen(pj) {
+						continue
+					}
+					d := Distance2D(*pi, pj)
+					if d > 0.005 && d < 0.25 {
+						*pi = pj
+						bridged = true
+						break
+					}
+				}
+				if bridged {
+					break
+				}
+			}
+		}
+	}
+	return out
+}
+
 // PlaneBasis returns the (origin, xDir, yDir) world basis for an IR sketch
 // plane value: "XY", "XZ", "YZ", or a map with "origin"/"x_dir"/"y_dir"
 // float arrays. ok is false for unknown shapes.
