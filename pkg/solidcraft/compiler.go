@@ -1586,79 +1586,15 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature, snap []cadir
 		}
 	}
 
-	// Smart fallback: if cutting or joining multi-profile failed, try individual profiles sequentially
-	if len(targetIndices) > 1 && len(targetIndices) <= 6 {
-		var lastErr error
-		succeededCount := 0
-		for _, idx := range targetIndices {
-			featName := e.Name
-			if succeededCount > 0 {
-				featName = fmt.Sprintf("Synthetic_%s_Part_%d", e.Name, succeededCount+1)
-			}
-			subParams := SolidExtrudeParams{
-				Name:        featName,
-				Distance:    e.DistanceMM,
-				StartOffset: e.StartOffsetMM,
-				Operation:   string(e.Operation),
-				Profiles:    []int{idx},
-				Targets:     targetBodies,
-			}
-			if sketchRef != nil {
-				subParams.Sketch = sketchRef
-			}
-			if e.Operation == "new" && desiredBodyName != "" {
-				subParams.BodyName = desiredBodyName
-			}
-			subResp, pErr := c.client.Execute("solid.extrude", subParams)
-			if pErr != nil && strings.Contains(pErr.Error(), "still running") {
-				lastErr = pErr
-				break
-			}
-			if pErr != nil && e.Operation == "cut" && len(targetBodies) > 1 && len(targetIndices) <= 6 {
-				for _, tb := range targetBodies {
-					tbFeatName := e.Name
-					if succeededCount > 0 {
-						tbFeatName = fmt.Sprintf("Synthetic_%s_Part_%d", e.Name, succeededCount+1)
-					}
-					tbParams := subParams
-					tbParams.Name = tbFeatName
-					tbParams.Targets = []string{tb}
-					tbResp, tbErr := c.client.Execute("solid.extrude", tbParams)
-					if tbErr != nil && strings.Contains(tbErr.Error(), "still running") {
-						pErr = tbErr
-						break
-					}
-					if tbErr == nil {
-						c.renameFeature(tbResp, tbFeatName)
-						subResp = tbResp
-						pErr = nil
-						succeededCount++
-					}
-				}
-				if pErr != nil && strings.Contains(pErr.Error(), "still running") {
-					lastErr = pErr
-					break
-				}
-				if pErr == nil {
-					continue
-				}
-			}
-			if pErr != nil {
-				lastErr = pErr
-			} else {
-				c.renameFeature(subResp, featName)
-				succeededCount++
-				if e.Operation == "new" {
-					c.checkAndRenameBodies(subResp, desiredBodyName)
-				}
-			}
-		}
-		if succeededCount > 0 {
+	// Smart fallback: if cutting or joining multi-profile failed, recursively bisect
+	// to cut all valid profiles in minimal batches while isolating kernel-failing profiles.
+	if len(targetIndices) > 1 {
+		partCounter := 2
+		mid := len(targetIndices) / 2
+		n1 := c.executeBatchExtrude(extParams, targetIndices[:mid], desiredBodyName, e.Name, &partCounter)
+		n2 := c.executeBatchExtrude(extParams, targetIndices[mid:], desiredBodyName, e.Name, &partCounter)
+		if n1+n2 > 0 {
 			c.mergeParticipantBodies(e, snap, desiredBodyName)
-			return nil
-		}
-		if lastErr != nil {
-			fmt.Printf("Notice: extrude %s (%s, %.2f mm) fallback could not apply: %v\n", e.Name, e.Operation, e.DistanceMM, lastErr)
 			return nil
 		}
 	}
@@ -2385,6 +2321,7 @@ func (c *Compiler) compileMultiBodyExtrude(e cadir.ExtrudeFeature, profs []int, 
 		side[best] = append(side[best], n)
 	}
 	first := true
+	targetsHandled := 0
 	for _, t := range targets {
 		ps := groups[t]
 		if len(ps) == 0 {
@@ -2407,82 +2344,130 @@ func (c *Compiler) compileMultiBodyExtrude(e cadir.ExtrudeFeature, profs []int, 
 			params.StartOffset = e.StartOffsetMM
 		}
 		resp, err := c.client.Execute("solid.extrude", params)
-		if err != nil {
-			fmt.Printf("Notice: extrude %s (%s) could not apply: %v\n", name, t, err)
-			// Recovery ladder for a failed join/cut extrude against this
-			// target. SolidCraft's boolean rejects tools that only touch
-			// curved target faces; a raising of the tool's start plane makes
-			// it strictly intersect (geometry preserved: tool volume outside
-			// the target is inert, and raised cut depth compensates exactly).
-			allTargets := append([]string{t}, side[t]...)
-			done := false
-			if e.Operation == "cut" {
-				for _, raise := range [...]float64{1, 5} {
-					raised := params
-					raised.StartOffset = params.StartOffset + raise
-					raised.Distance = params.Distance - raise
-					rResp, rErr := c.client.Execute("solid.extrude", raised)
-					if rErr == nil {
-						c.renameFeature(rResp, name)
-						c.checkAndRenameBodies(rResp, t)
-						done = true
-						break
-					}
-					fmt.Printf("Notice: raised cut %s (%s, +%gmm) failed: %v\n", name, t, raise, rErr)
-				}
-			}
-			if done {
-				continue
-			}
-			for i, bt := range allTargets {
-				fbName := fmt.Sprintf("Synthetic_Join_%s_%d", e.Name, i+1)
-				raises := []float64{0}
-				if e.Operation == "cut" {
-					raises = []float64{1, 5}
-				}
-				var combineErr error
-				for _, raise := range raises {
-					newParams := SolidExtrudeParams{
-						Name:        fbName,
-						Distance:    e.DistanceMM - raise,
-						StartOffset: e.StartOffsetMM + raise,
-						Operation:   "new",
-						Profiles:    ps,
-						Sketch:      sketchRef,
-					}
-					newResp, newErr := c.client.Execute("solid.extrude", newParams)
-					if newErr == nil {
-						c.renameFeature(newResp, fbName)
-						var res struct {
-							CreatedBodies []string `json:"created_bodies"`
-						}
-						if json.Unmarshal([]byte(newResp), &res) == nil && len(res.CreatedBodies) > 0 {
-							cResp, cErr := c.client.Execute("solid.combine", SolidCombineParams{
-								Target:    bt,
-								Tools:     []string{res.CreatedBodies[0]},
-								Operation: string(e.Operation),
-								KeepTools: false,
-							})
-							if cErr == nil {
-								c.renameFeature(cResp, fbName+"_merge")
-								c.checkAndRenameBodies(cResp, bt)
-								combineErr = nil
-								break
-							}
-							combineErr = cErr
-						}
-					} else {
-						combineErr = newErr
-					}
-				}
-				if combineErr != nil {
-					fmt.Printf("Notice: synthetic combine %s into %s failed: %v\n", fbName, bt, combineErr)
-				}
-			}
+		if err == nil {
+			c.renameFeature(resp, name)
+			c.checkAndRenameBodies(resp, t)
+			targetsHandled++
 			continue
 		}
-		c.renameFeature(resp, name)
-		c.checkAndRenameBodies(resp, t)
+
+		fmt.Printf("Notice: extrude %s (%s) could not apply: %v\n", name, t, err)
+
+		// If this target has multiple profiles, recursively bisect to cut all valid
+		// profiles in minimal batches while isolating kernel-failing profiles.
+		if len(ps) > 1 {
+			partCounter := 2
+			mid := len(ps) / 2
+			n1 := c.executeBatchExtrude(params, ps[:mid], t, name, &partCounter)
+			n2 := c.executeBatchExtrude(params, ps[mid:], t, name, &partCounter)
+			if n1+n2 > 0 {
+				targetsHandled++
+				continue
+			}
+		}
+
+		// Recovery ladder for a failed join/cut extrude against this
+		// target. SolidCraft's boolean rejects tools that only touch
+		// curved target faces; a raising of the tool's start plane makes
+		// it strictly intersect (geometry preserved: tool volume outside
+		// the target is inert, and raised cut depth compensates exactly).
+		allTargets := append([]string{t}, side[t]...)
+		done := false
+		if e.Operation == "cut" {
+			for _, raise := range [...]float64{1, 5} {
+				raised := params
+				raised.StartOffset = params.StartOffset + raise
+				raised.Distance = params.Distance - raise
+				rResp, rErr := c.client.Execute("solid.extrude", raised)
+				if rErr == nil {
+					c.renameFeature(rResp, name)
+					c.checkAndRenameBodies(rResp, t)
+					done = true
+					targetsHandled++
+					break
+				}
+				fmt.Printf("Notice: raised cut %s (%s, +%gmm) failed: %v\n", name, t, raise, rErr)
+			}
+		}
+		if done {
+			continue
+		}
+		for i, bt := range allTargets {
+			fbName := fmt.Sprintf("Synthetic_Join_%s_%d", e.Name, i+1)
+			raises := []float64{0}
+			if e.Operation == "cut" {
+				raises = []float64{1, 5}
+			}
+			var combineErr error
+			for _, raise := range raises {
+				newParams := SolidExtrudeParams{
+					Name:        fbName,
+					Distance:    e.DistanceMM - raise,
+					StartOffset: e.StartOffsetMM + raise,
+					Operation:   "new",
+					Profiles:    ps,
+					Sketch:      sketchRef,
+				}
+				newResp, newErr := c.client.Execute("solid.extrude", newParams)
+				if newErr == nil {
+					c.renameFeature(newResp, fbName)
+					var res struct {
+						CreatedBodies []string `json:"created_bodies"`
+					}
+					if json.Unmarshal([]byte(newResp), &res) == nil && len(res.CreatedBodies) > 0 {
+						cResp, cErr := c.client.Execute("solid.combine", SolidCombineParams{
+							Target:    bt,
+							Tools:     []string{res.CreatedBodies[0]},
+							Operation: string(e.Operation),
+							KeepTools: false,
+						})
+						if cErr == nil {
+							c.renameFeature(cResp, fbName+"_merge")
+							c.checkAndRenameBodies(cResp, bt)
+							combineErr = nil
+							targetsHandled++
+							break
+						}
+						combineErr = cErr
+					}
+				} else {
+					combineErr = newErr
+				}
+			}
+			if combineErr != nil {
+				fmt.Printf("Notice: synthetic combine %s into %s failed: %v\n", fbName, bt, combineErr)
+			}
+		}
 	}
-	return true
+	return targetsHandled > 0
+}
+
+// executeBatchExtrude applies an extrude operation for a list of profile indices.
+// If the batch fails and len(profs) > 1, it recursively bisects the profile
+// list so that all valid profiles apply in minimal batches while isolating kernel-failing profiles.
+func (c *Compiler) executeBatchExtrude(params SolidExtrudeParams, profs []int, targetBody, baseFeatName string, partCounter *int) int {
+	if len(profs) == 0 {
+		return 0
+	}
+	p := params
+	p.Profiles = profs
+	p.Name = fmt.Sprintf("%s_Part_%d", baseFeatName, *partCounter)
+	*partCounter++
+
+	resp, err := c.client.Execute("solid.extrude", p)
+	if err == nil {
+		c.renameFeature(resp, p.Name)
+		c.checkAndRenameBodies(resp, targetBody)
+		return len(profs)
+	}
+
+	if len(profs) == 1 {
+		fmt.Printf("Notice: profile %d could not apply on %s: %v\n", profs[0], targetBody, err)
+		return 0
+	}
+
+	mid := len(profs) / 2
+	n1 := c.executeBatchExtrude(params, profs[:mid], targetBody, baseFeatName, partCounter)
+	n2 := c.executeBatchExtrude(params, profs[mid:], targetBody, baseFeatName, partCounter)
+	return n1 + n2
 }
