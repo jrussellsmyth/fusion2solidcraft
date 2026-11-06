@@ -760,9 +760,45 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, snap []cadir.B
 		return true
 	}
 
+	postVol := make(map[string]float64)
+	if snap != nil {
+		for _, b := range snap {
+			postVol[b.Name] = b.VolumeMM3
+		}
+	}
+	preVol := make(map[string]float64)
+	if c.model != nil && c.curStep > 0 && c.curStep-1 < len(c.model.Timeline) {
+		for _, b := range c.model.Timeline[c.curStep-1].BodySnapshot {
+			preVol[b.Name] = b.VolumeMM3
+		}
+	}
+
 	targets := e.ResultBodies
 	if len(targets) == 0 && desiredBodyName != "" {
 		targets = []string{desiredBodyName}
+	}
+
+	// Filter targets to bodies that actually grew in volume compared to the pre-step snapshot.
+	// A bystander body whose volume is unchanged did not absorb any participant and must not be targeted.
+	if len(preVol) > 0 && len(postVol) > 0 {
+		var growingTargets []string
+		for _, t := range targets {
+			postV, hasPost := postVol[t]
+			preV, hasPre := preVol[t]
+			if hasPost {
+				if !hasPre || postV > preV+0.1 {
+					growingTargets = append(growingTargets, t)
+				}
+			}
+		}
+		if len(growingTargets) > 0 {
+			sort.Slice(growingTargets, func(i, j int) bool {
+				deltaI := postVol[growingTargets[i]] - preVol[growingTargets[i]]
+				deltaJ := postVol[growingTargets[j]] - preVol[growingTargets[j]]
+				return deltaI > deltaJ
+			})
+			targets = growingTargets
+		}
 	}
 
 	targetInScene := false
@@ -836,6 +872,62 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, snap []cadir.B
 				c.renameFeature(resp, fmt.Sprintf("Synthetic_Merge_%s_%d", e.Name, mergeIdx))
 				c.checkAndRenameBodies(resp, actualTarget)
 				break
+			}
+
+			// SMLib boolean join failed (e.g. status 1001 coincident topology).
+			// Check if this is a coincident body absorption where one body already
+			// contains the full expected post-step volume of the target.
+			expectedVol := postVol[t]
+			if expectedVol > 0 {
+				actualBodies, _ := c.inspectBodies()
+				var vPB, vTarget float64
+				pbFound, targetFound := false, false
+				for _, ab := range actualBodies {
+					if ab.Name == actualPB {
+						vPB = ab.VolumeMM3
+						pbFound = true
+					}
+					if ab.Name == actualTarget {
+						vTarget = ab.VolumeMM3
+						targetFound = true
+					}
+				}
+				if pbFound && targetFound {
+					relDiffPB := math.Abs(vPB-expectedVol) / expectedVol
+					relDiffTarget := math.Abs(vTarget-expectedVol) / expectedVol
+
+					if relDiffPB <= 0.02 && vTarget < 0.8*expectedVol {
+						tempAbsorbed := fmt.Sprintf("%s_absorbed_%d", actualTarget, c.curStep)
+						_ = c.renameBody(actualTarget, tempAbsorbed)
+						_ = c.renameBody(actualPB, actualTarget)
+						_, _ = c.client.Execute("solid.remove", map[string]interface{}{
+							"bodies": []string{tempAbsorbed},
+						})
+						for k, v := range c.bodyMap {
+							if v == actualPB || v == tempAbsorbed {
+								c.bodyMap[k] = actualTarget
+							}
+						}
+						c.bodyMap[actualPB] = actualTarget
+						c.bodyMap[pb] = actualTarget
+						c.bodyMap[t] = actualTarget
+						break
+					}
+
+					if relDiffTarget <= 0.02 && vPB < 0.8*expectedVol {
+						_, _ = c.client.Execute("solid.remove", map[string]interface{}{
+							"bodies": []string{actualPB},
+						})
+						for k, v := range c.bodyMap {
+							if v == actualPB {
+								c.bodyMap[k] = actualTarget
+							}
+						}
+						c.bodyMap[actualPB] = actualTarget
+						c.bodyMap[pb] = actualTarget
+						break
+					}
+				}
 			}
 		}
 	}
