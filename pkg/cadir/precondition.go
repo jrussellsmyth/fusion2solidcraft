@@ -205,6 +205,219 @@ func SplitArcsAtCircles(curves []Curve) []Curve {
 	return out
 }
 
+// SeparateIsolatedTangentCircles detects circles that are part of an isolated closed
+// feature (like a slot or standalone hole) touching a boundary line tangentially,
+// which would otherwise create a non-manifold self-touching pinch point in B-rep
+// kernels like SMLib. It nudges the circle away from the line by a micron (0.001 mm)
+// to ensure a valid manifold polygon boundary while preserving volume and geometry.
+func SeparateIsolatedTangentCircles(curves []Curve) []Curve {
+	const (
+		tangencyTol = 0.005 // 5 microns
+		gap         = 0.001 // 1 micron clearance
+		connEps     = 0.05  // connection tolerance
+	)
+
+	out := make([]Curve, len(curves))
+	copy(out, curves)
+
+	type indexedCurve struct {
+		origIdx int
+		c       Curve
+	}
+	var nonConst []indexedCurve
+	for i, c := range out {
+		if !c.Construction {
+			nonConst = append(nonConst, indexedCurve{origIdx: i, c: c})
+		}
+	}
+	if len(nonConst) == 0 {
+		return out
+	}
+
+	getEndpoints := func(c Curve) []Point2D {
+		if c.Type == CurveTypeCircle {
+			return nil
+		}
+		return []Point2D{c.Start, c.End}
+	}
+
+	curvesConnect := func(ca, cb Curve, exemptPt Point2D) bool {
+		ptsA := getEndpoints(ca)
+		ptsB := getEndpoints(cb)
+		if ca.Type == CurveTypeCircle {
+			for _, pb := range ptsB {
+				if math.Abs(Distance2D(pb, ca.Center)-ca.Radius) < connEps && Distance2D(pb, exemptPt) > connEps {
+					return true
+				}
+			}
+		}
+		if cb.Type == CurveTypeCircle {
+			for _, pa := range ptsA {
+				if math.Abs(Distance2D(pa, cb.Center)-cb.Radius) < connEps && Distance2D(pa, exemptPt) > connEps {
+					return true
+				}
+			}
+		}
+		for _, pa := range ptsA {
+			for _, pb := range ptsB {
+				if Distance2D(pa, pb) < connEps && Distance2D(pa, exemptPt) > connEps {
+					return true
+				}
+			}
+		}
+		return false
+	}
+
+	for ncIdx, nc := range nonConst {
+		c := nc.c
+		if c.Type != CurveTypeCircle || c.Radius <= 0 {
+			continue
+		}
+
+		type tangentHit struct {
+			lineIdx   int
+			contactPt Point2D
+			dist      float64
+		}
+		var hits []tangentHit
+
+		for lIdx, lItem := range nonConst {
+			l := lItem.c
+			if l.Type != CurveTypeLine {
+				continue
+			}
+			vx := l.End.X - l.Start.X
+			vy := l.End.Y - l.Start.Y
+			lenSq := vx*vx + vy*vy
+			if lenSq < 1e-12 {
+				continue
+			}
+			t := ((c.Center.X-l.Start.X)*vx + (c.Center.Y-l.Start.Y)*vy) / lenSq
+			if t < 0.01 || t > 0.99 {
+				continue
+			}
+			qx := l.Start.X + t*vx
+			qy := l.Start.Y + t*vy
+			q := Point2D{X: qx, Y: qy}
+			d := Distance2D(c.Center, q)
+			if math.Abs(d-c.Radius) < tangencyTol {
+				hits = append(hits, tangentHit{lineIdx: lIdx, contactPt: q, dist: d})
+			}
+		}
+
+		if len(hits) == 0 {
+			continue
+		}
+
+		// If tangent to multiple non-parallel lines (corner fillet), skip
+		isCorner := false
+		for j := 0; j < len(hits); j++ {
+			for k := j + 1; k < len(hits); k++ {
+				l1 := nonConst[hits[j].lineIdx].c
+				l2 := nonConst[hits[k].lineIdx].c
+				v1x, v1y := l1.End.X-l1.Start.X, l1.End.Y-l1.Start.Y
+				v2x, v2y := l2.End.X-l2.Start.X, l2.End.Y-l2.Start.Y
+				cross := v1x*v2y - v1y*v2x
+				l1Len := math.Hypot(v1x, v1y)
+				l2Len := math.Hypot(v2x, v2y)
+				if l1Len > 1e-6 && l2Len > 1e-6 && math.Abs(cross)/(l1Len*l2Len) > 0.1 {
+					isCorner = true
+					break
+				}
+			}
+			if isCorner {
+				break
+			}
+		}
+		if isCorner {
+			continue
+		}
+
+		for _, hit := range hits {
+			lIdx := hit.lineIdx
+			q := hit.contactPt
+			d := hit.dist
+
+			visited := make([]bool, len(nonConst))
+			visited[ncIdx] = true
+			queue := []int{ncIdx}
+
+			for len(queue) > 0 {
+				currIdx := queue[0]
+				queue = queue[1:]
+				curr := nonConst[currIdx].c
+				for otherIdx, otherItem := range nonConst {
+					if visited[otherIdx] || otherIdx == lIdx {
+						continue
+					}
+					if curvesConnect(curr, otherItem.c, q) {
+						visited[otherIdx] = true
+						queue = append(queue, otherIdx)
+					}
+				}
+			}
+
+			touchesOutside := false
+			visitedCount := 0
+			for vIdx, isV := range visited {
+				if !isV {
+					continue
+				}
+				visitedCount++
+				vc := nonConst[vIdx].c
+
+				// Check if vc connects to line l away from q
+				pts := getEndpoints(vc)
+				for _, p := range pts {
+					if Distance2D(p, q) <= connEps {
+						continue
+					}
+					lCurve := nonConst[lIdx].c
+					vx := lCurve.End.X - lCurve.Start.X
+					vy := lCurve.End.Y - lCurve.Start.Y
+					lLenSq := vx*vx + vy*vy
+					if lLenSq > 1e-12 {
+						tP := ((p.X-lCurve.Start.X)*vx + (p.Y-lCurve.Start.Y)*vy) / lLenSq
+						if tP >= -0.01 && tP <= 1.01 {
+							proj := Point2D{X: lCurve.Start.X + tP*vx, Y: lCurve.Start.Y + tP*vy}
+							if Distance2D(p, proj) < connEps {
+								touchesOutside = true
+								break
+							}
+						}
+					}
+				}
+				if touchesOutside {
+					break
+				}
+
+				for otherIdx, otherItem := range nonConst {
+					if visited[otherIdx] || otherIdx == lIdx {
+						continue
+					}
+					if curvesConnect(vc, otherItem.c, q) {
+						touchesOutside = true
+						break
+					}
+				}
+				if touchesOutside {
+					break
+				}
+			}
+
+			if !touchesOutside && visitedCount <= 6 && d > 1e-12 {
+				ux := (c.Center.X - q.X) / d
+				uy := (c.Center.Y - q.Y) / d
+				shift := (c.Radius + gap) - d
+				out[nc.origIdx].Center.X += shift * ux
+				out[nc.origIdx].Center.Y += shift * uy
+				break
+			}
+		}
+	}
+	return out
+}
+
 // PlaneBasis returns the (origin, xDir, yDir) world basis for an IR sketch
 // plane value: "XY", "XZ", "YZ", or a map with "origin"/"x_dir"/"y_dir"
 // float arrays. ok is false for unknown shapes.
