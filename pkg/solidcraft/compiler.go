@@ -2126,7 +2126,10 @@ func (c *Compiler) compileAndExecuteFillet(f cadir.FilletFeature) error {
 	}
 
 	type edgePoint struct {
-		Mid []float64 `json:"mid"`
+		Mid   []float64 `json:"mid"`
+		Start []float64 `json:"start"`
+		End   []float64 `json:"end"`
+		Name  string    `json:"name"`
 	}
 	var allEdges []edgePoint
 	for _, bName := range bodyCandidates {
@@ -2142,11 +2145,13 @@ func (c *Compiler) compileAndExecuteFillet(f cadir.FilletFeature) error {
 		}
 	}
 
-	var matchedEdges [][]float64
+	var matchedEdges []edgePoint
+	seenMid := make(map[[3]int]bool)
 	for _, target := range f.TargetEdges {
 		bestDist := 1e9
-		var bestMid []float64
-		for _, e := range allEdges {
+		var bestEdge *edgePoint
+		for i := range allEdges {
+			e := &allEdges[i]
 			if len(e.Mid) == 3 {
 				dx := e.Mid[0] - target.X
 				dy := e.Mid[1] - target.Y
@@ -2154,12 +2159,20 @@ func (c *Compiler) compileAndExecuteFillet(f cadir.FilletFeature) error {
 				dist := math.Sqrt(dx*dx + dy*dy + dz*dz)
 				if dist < bestDist {
 					bestDist = dist
-					bestMid = e.Mid
+					bestEdge = e
 				}
 			}
 		}
-		if bestDist < 0.5 && bestMid != nil {
-			matchedEdges = append(matchedEdges, bestMid)
+		if bestDist < 2.5 && bestEdge != nil {
+			key := [3]int{
+				int(math.Round(bestEdge.Mid[0] * 1000)),
+				int(math.Round(bestEdge.Mid[1] * 1000)),
+				int(math.Round(bestEdge.Mid[2] * 1000)),
+			}
+			if !seenMid[key] {
+				seenMid[key] = true
+				matchedEdges = append(matchedEdges, *bestEdge)
+			}
 		}
 	}
 
@@ -2167,9 +2180,52 @@ func (c *Compiler) compileAndExecuteFillet(f cadir.FilletFeature) error {
 		return nil
 	}
 
+	// SolidCraft splits degree-5 B-spline side faces at interior knots into shorter
+	// B-spline spans. An isolated short (<15 mm) span in the middle of a multi-span
+	// spline cannot terminate a non-propagated blend cleanly, so filter out isolated
+	// short spans when multiple edges are selected.
+	var mids [][]float64
+	if len(matchedEdges) > 1 {
+		ptKey := func(pt []float64) [3]int {
+			if len(pt) < 3 {
+				return [3]int{}
+			}
+			return [3]int{
+				int(math.Round(pt[0] * 20)),
+				int(math.Round(pt[1] * 20)),
+				int(math.Round(pt[2] * 20)),
+			}
+		}
+		vertexCount := make(map[[3]int]int)
+		for _, e := range matchedEdges {
+			vertexCount[ptKey(e.Start)]++
+			vertexCount[ptKey(e.End)]++
+		}
+		for _, e := range matchedEdges {
+			isolated := vertexCount[ptKey(e.Start)] <= 1 && vertexCount[ptKey(e.End)] <= 1
+			chord := 0.0
+			if len(e.Start) == 3 && len(e.End) == 3 {
+				chord = math.Sqrt(
+					(e.End[0]-e.Start[0])*(e.End[0]-e.Start[0]) +
+						(e.End[1]-e.Start[1])*(e.End[1]-e.Start[1]) +
+						(e.End[2]-e.Start[2])*(e.End[2]-e.Start[2]))
+			}
+			if !isolated || chord >= 15.0 {
+				mids = append(mids, e.Mid)
+			}
+		}
+	}
+	if len(mids) == 0 {
+		for _, e := range matchedEdges {
+			mids = append(mids, e.Mid)
+		}
+	}
+
+	noChain := false
 	resp, err := c.client.Execute("solid.fillet", SolidFilletParams{
-		Radius: f.RadiusMM,
-		Edges:  matchedEdges,
+		Radius:       f.RadiusMM,
+		Edges:        mids,
+		TangentChain: &noChain,
 	})
 	if err == nil {
 		c.renameFeature(resp, f.Name)

@@ -723,10 +723,28 @@ def run(_context: str):
                         rad = es.radius.value * 10
                 
                 edges = []
-                for f_idx in range(fillet.faces.count):
-                    f = fillet.faces.item(f_idx)
-                    c = f.centroid
-                    edges.append({"x": c.x * 10, "y": c.y * 10, "z": c.z * 10})
+                try:
+                    item.rollTo(True)
+                    for es_idx in range(fillet.edgeSets.count):
+                        es = fillet.edgeSets.item(es_idx)
+                        if hasattr(es, 'edges') and es.edges:
+                            for e_idx in range(es.edges.count):
+                                e_obj = es.edges.item(e_idx)
+                                pt = e_obj.pointOnEdge
+                                edges.append({"x": pt.x * 10, "y": pt.y * 10, "z": pt.z * 10})
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        item.rollTo(False)
+                    except Exception:
+                        pass
+
+                if not edges:
+                    for f_idx in range(fillet.faces.count):
+                        f = fillet.faces.item(f_idx)
+                        c = f.centroid
+                        edges.append({"x": c.x * 10, "y": c.y * 10, "z": c.z * 10})
                 
                 target_bodies = []
                 try:
