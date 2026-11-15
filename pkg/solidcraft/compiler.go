@@ -466,15 +466,8 @@ func (c *Compiler) CompileModelWithOptions(model *cadir.Model, opts CompileOptio
 func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 	var cmds []Command
 
-	// Universal pre-conditioning:
-	// 1. Separate isolated tangent circles from boundary lines so SolidCraft
-	//    avoids non-manifold self-touching pinch points in SMLib.
-	curves := cadir.SeparateIsolatedTangentCircles(s.Curves)
-	// 2. Split arcs at circle intersections so SolidCraft region detection sees the
-	//    same trimmed curve arrangement Fusion used.
-	curves = cadir.SplitArcsAtCircles(curves)
-	// 3. Bridge open collinear micro-gaps between adjacent line segments.
-	curves = cadir.BridgeOpenCollinearGaps(curves)
+	// Bridge open collinear micro-gaps between adjacent line segments.
+	curves := cadir.BridgeOpenCollinearGaps(s.Curves)
 
 	// 1. sketch.create
 	plane := s.Plane

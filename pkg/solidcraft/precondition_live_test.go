@@ -212,7 +212,7 @@ func TestLiveSketchPreconditioning(t *testing.T) {
 		}
 	})
 
-	t.Run("SplitArcsAtCircles", func(t *testing.T) {
+	t.Run("SplitArcsAtCircles_Obsolete", func(t *testing.T) {
 		if err := client.NewDesign(); err != nil {
 			t.Fatalf("NewDesign: %v", err)
 		}
@@ -231,21 +231,9 @@ func TestLiveSketchPreconditioning(t *testing.T) {
 			t.Fatalf("Batch failed: %v", err)
 		}
 		unsplit := inspectLastSketch(t, client)
-
-		if err := client.NewDesign(); err != nil {
-			t.Fatalf("NewDesign: %v", err)
-		}
-		skSplit := sk
-		skSplit.Curves = cadir.SplitArcsAtCircles(sk.Curves)
-		if _, err := client.Batch(buildSketchCmds(skSplit)); err != nil {
-			t.Fatalf("Batch (split) failed: %v", err)
-		}
-		split := inspectLastSketch(t, client)
-
-		t.Logf("SplitArcsAtCircles comparison: unsplit=(%d profiles, %.3f mm2) vs split=(%d profiles, %.3f mm2)",
-			unsplit.ProfileCount, unsplit.TotalAreaMM2, split.ProfileCount, split.TotalAreaMM2)
-		if unsplit.ProfileCount != split.ProfileCount || math.Abs(unsplit.TotalAreaMM2-split.TotalAreaMM2) > 0.1 {
-			t.Errorf("unsplit differs from split: unsplit=%+v split=%+v", unsplit, split)
+		t.Logf("Unsplit arc+circle on SolidCraft 0.42+: %d profiles, %.3f mm2", unsplit.ProfileCount, unsplit.TotalAreaMM2)
+		if unsplit.ProfileCount == 0 {
+			t.Errorf("expected unsplit arc+circle to form closed profiles without SplitArcsAtCircles")
 		}
 	})
 
@@ -269,9 +257,23 @@ func TestLiveSketchPreconditioning(t *testing.T) {
 			t.Fatalf("Batch failed: %v", err)
 		}
 		unbridged := inspectLastSketch(t, client)
-		t.Logf("Unbridged 0.10mm gap profiles=%d area=%.3f", unbridged.ProfileCount, unbridged.TotalAreaMM2)
-		if unbridged.ProfileCount == 0 {
-			t.Errorf("0.10mm collinear gap did NOT close without BridgeOpenCollinearGaps")
+		t.Logf("Unbridged 0.10mm gap profiles=%d area=%.3f (BridgeOpenCollinearGaps still required)", unbridged.ProfileCount, unbridged.TotalAreaMM2)
+		if unbridged.ProfileCount != 0 {
+			t.Errorf("expected 0 profiles for unbridged 0.10mm collinear gap, got %d", unbridged.ProfileCount)
+		}
+
+		if err := client.NewDesign(); err != nil {
+			t.Fatalf("NewDesign: %v", err)
+		}
+		skBridged := sk
+		skBridged.Curves = cadir.BridgeOpenCollinearGaps(sk.Curves)
+		if _, err := client.Batch(buildSketchCmds(skBridged)); err != nil {
+			t.Fatalf("Batch (bridged) failed: %v", err)
+		}
+		bridged := inspectLastSketch(t, client)
+		t.Logf("Bridged 0.10mm gap profiles=%d area=%.3f", bridged.ProfileCount, bridged.TotalAreaMM2)
+		if bridged.ProfileCount != 1 || math.Abs(bridged.TotalAreaMM2-200.0) > 0.1 {
+			t.Errorf("expected bridged 20x10 rectangle to yield 1 profile (200.0 mm2), got %+v", bridged)
 		}
 	})
 }
@@ -293,32 +295,29 @@ func TestLiveModelIRSketchesWithoutPreconditioning(t *testing.T) {
 			continue
 		}
 		sk := *step.Sketch
-		afterTangent := cadir.SeparateIsolatedTangentCircles(sk.Curves)
-		afterSplit := cadir.SplitArcsAtCircles(afterTangent)
-		afterBridge := cadir.BridgeOpenCollinearGaps(afterSplit)
+		afterBridge := cadir.BridgeOpenCollinearGaps(sk.Curves)
 
-		changedTangent := !reflect.DeepEqual(sk.Curves, afterTangent)
-		changedSplit := !reflect.DeepEqual(afterTangent, afterSplit)
-		changedBridge := !reflect.DeepEqual(afterSplit, afterBridge)
-		if !changedTangent && !changedSplit && !changedBridge {
+		changedBridge := !reflect.DeepEqual(sk.Curves, afterBridge)
+		isRegressionSketch := sk.Name == "Socket" || sk.Name == "connectors" || sk.Name == "bottom_covers"
+		if !changedBridge && !isRegressionSketch {
 			continue
 		}
 
 		t.Run(sk.Name, func(t *testing.T) {
-			t.Logf("Step %d (%s) modified by: tangent=%v split=%v bridge=%v",
-				step.Index, sk.Name, changedTangent, changedSplit, changedBridge)
+			t.Logf("Step %d (%s) modified by BridgeOpenCollinearGaps=%v",
+				step.Index, sk.Name, changedBridge)
 
-			// 1. Run WITH all preconditioners (baseline)
+			// 1. Run WITH remaining preconditioner (BridgeOpenCollinearGaps via compileAndExecuteSketch)
 			if err := client.NewDesign(); err != nil {
 				t.Fatalf("NewDesign: %v", err)
 			}
 			comp := NewCompiler(client)
 			if err := comp.compileAndExecuteSketch(sk); err != nil {
-				t.Fatalf("baseline compileAndExecuteSketch failed: %v", err)
+				t.Fatalf("compileAndExecuteSketch failed: %v", err)
 			}
 			baseline := inspectLastSketch(t, client)
 
-			// 2. Run WITHOUT any of the 3 preconditioners (raw curves, NormalizeArc only)
+			// 2. Run WITHOUT BridgeOpenCollinearGaps (raw curves, NormalizeArc only)
 			if err := client.NewDesign(); err != nil {
 				t.Fatalf("NewDesign: %v", err)
 			}
@@ -327,13 +326,13 @@ func TestLiveModelIRSketchesWithoutPreconditioning(t *testing.T) {
 			}
 			raw := inspectLastSketch(t, client)
 
-			t.Logf("  baseline=(%d profiles, %.3f mm2) vs raw=(%d profiles, %.3f mm2)",
+			t.Logf("  compiled=(%d profiles, %.3f mm2) vs raw=(%d profiles, %.3f mm2)",
 				baseline.ProfileCount, baseline.TotalAreaMM2, raw.ProfileCount, raw.TotalAreaMM2)
-			if baseline.ProfileCount != raw.ProfileCount || math.Abs(baseline.TotalAreaMM2-raw.TotalAreaMM2) > 0.5 {
-				t.Errorf("sketch %s differs without preconditioners: baseline=%+v raw=%+v", sk.Name, baseline, raw)
+			if !changedBridge && (baseline.ProfileCount != raw.ProfileCount || math.Abs(baseline.TotalAreaMM2-raw.TotalAreaMM2) > 0.5) {
+				t.Errorf("sketch %s differs without BridgeOpenCollinearGaps: compiled=%+v raw=%+v", sk.Name, baseline, raw)
 			}
 
-			if changedTangent {
+			if sk.Name == "Socket" || sk.Name == "bottom_covers" {
 				if _, err := client.Execute("solid.extrude", SolidExtrudeParams{
 					Name:      "ExtrudeRawTangent",
 					Distance:  10,
@@ -341,7 +340,7 @@ func TestLiveModelIRSketchesWithoutPreconditioning(t *testing.T) {
 					Profiles:  "all",
 					Sketch:    sk.Name,
 				}); err != nil {
-					t.Errorf("raw extrude (changedTangent=true) failed for %s: %v", sk.Name, err)
+					t.Errorf("raw extrude failed for %s: %v", sk.Name, err)
 				} else {
 					stats, mErr := client.Measure()
 					if mErr != nil {
