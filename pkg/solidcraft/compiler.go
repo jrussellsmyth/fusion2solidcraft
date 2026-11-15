@@ -470,10 +470,7 @@ func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 	// 1. Separate isolated tangent circles from boundary lines so SolidCraft
 	//    avoids non-manifold self-touching pinch points in SMLib.
 	curves := cadir.SeparateIsolatedTangentCircles(s.Curves)
-	// 2. Split arcs at circle intersections so SolidCraft region detection sees the
-	//    same trimmed curve arrangement Fusion used.
-	curves = cadir.SplitArcsAtCircles(curves)
-	// 3. Bridge open collinear micro-gaps between adjacent line segments.
+	// 2. Bridge open collinear micro-gaps between adjacent line segments.
 	curves = cadir.BridgeOpenCollinearGaps(curves)
 
 	// 1. sketch.create
