@@ -4,3 +4,4 @@ bin/
 *.solidcraft.bak
 .~*.lock
 model_ir.json
+.DS_Store
