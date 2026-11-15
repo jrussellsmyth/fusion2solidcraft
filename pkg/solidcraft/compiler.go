@@ -1954,6 +1954,7 @@ func (c *Compiler) compileAndExecuteFillet(f cadir.FilletFeature) error {
 	}
 
 	type edgePoint struct {
+		Body  string
 		Mid   []float64 `json:"mid"`
 		Start []float64 `json:"start"`
 		End   []float64 `json:"end"`
@@ -1969,11 +1970,14 @@ func (c *Compiler) compileAndExecuteFillet(f cadir.FilletFeature) error {
 			Edges []edgePoint `json:"edges"`
 		}
 		if json.Unmarshal([]byte(topoOut), &topo) == nil {
+			for i := range topo.Edges {
+				topo.Edges[i].Body = bName
+			}
 			allEdges = append(allEdges, topo.Edges...)
 		}
 	}
 
-	var matchedEdges []edgePoint
+	edgesByBody := make(map[string][][]float64)
 	seenMid := make(map[[3]int]bool)
 	for _, target := range f.TargetEdges {
 		bestDist := 1e9
@@ -1999,66 +2003,28 @@ func (c *Compiler) compileAndExecuteFillet(f cadir.FilletFeature) error {
 			}
 			if !seenMid[key] {
 				seenMid[key] = true
-				matchedEdges = append(matchedEdges, *bestEdge)
+				edgesByBody[bestEdge.Body] = append(edgesByBody[bestEdge.Body], bestEdge.Mid)
 			}
 		}
 	}
 
-	if len(matchedEdges) == 0 {
-		return nil
-	}
-
-	// SolidCraft splits degree-5 B-spline side faces at interior knots into shorter
-	// B-spline spans. An isolated short (<15 mm) span in the middle of a multi-span
-	// spline cannot terminate a non-propagated blend cleanly, so filter out isolated
-	// short spans when multiple edges are selected.
-	var mids [][]float64
-	if len(matchedEdges) > 1 {
-		ptKey := func(pt []float64) [3]int {
-			if len(pt) < 3 {
-				return [3]int{}
-			}
-			return [3]int{
-				int(math.Round(pt[0] * 20)),
-				int(math.Round(pt[1] * 20)),
-				int(math.Round(pt[2] * 20)),
-			}
+	for _, bName := range bodyCandidates {
+		mids := edgesByBody[bName]
+		if len(mids) == 0 {
+			continue
 		}
-		vertexCount := make(map[[3]int]int)
-		for _, e := range matchedEdges {
-			vertexCount[ptKey(e.Start)]++
-			vertexCount[ptKey(e.End)]++
+		delete(edgesByBody, bName)
+		resp, err := c.client.Execute("solid.fillet", SolidFilletParams{
+			Body:   bName,
+			Radius: f.RadiusMM,
+			Edges:  mids,
+		})
+		if err != nil {
+			return err
 		}
-		for _, e := range matchedEdges {
-			isolated := vertexCount[ptKey(e.Start)] <= 1 && vertexCount[ptKey(e.End)] <= 1
-			chord := 0.0
-			if len(e.Start) == 3 && len(e.End) == 3 {
-				chord = math.Sqrt(
-					(e.End[0]-e.Start[0])*(e.End[0]-e.Start[0]) +
-						(e.End[1]-e.Start[1])*(e.End[1]-e.Start[1]) +
-						(e.End[2]-e.Start[2])*(e.End[2]-e.Start[2]))
-			}
-			if !isolated || chord >= 15.0 {
-				mids = append(mids, e.Mid)
-			}
-		}
-	}
-	if len(mids) == 0 {
-		for _, e := range matchedEdges {
-			mids = append(mids, e.Mid)
-		}
-	}
-
-	noChain := false
-	resp, err := c.client.Execute("solid.fillet", SolidFilletParams{
-		Radius:       f.RadiusMM,
-		Edges:        mids,
-		TangentChain: &noChain,
-	})
-	if err == nil {
 		c.renameFeature(resp, f.Name)
 	}
-	return err
+	return nil
 }
 
 func (c *Compiler) compileAndExecuteAppearance(a cadir.AppearanceFeature) error {
