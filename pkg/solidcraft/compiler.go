@@ -727,8 +727,9 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, snap []cadir.B
 	}
 	var postDesign struct {
 		Bodies []struct {
-			Name string `json:"name"`
-			BBox struct {
+			Name      string  `json:"name"`
+			VolumeMM3 float64 `json:"volume_mm3"`
+			BBox      struct {
 				Min []float64 `json:"min"`
 				Max []float64 `json:"max"`
 			} `json:"bbox"`
@@ -739,10 +740,21 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, snap []cadir.B
 	}
 
 	bodyBBox := make(map[string][2][]float64)
+	bodyVol := make(map[string]float64)
 	for _, b := range postDesign.Bodies {
+		bodyVol[b.Name] = b.VolumeMM3
 		if len(b.BBox.Min) >= 3 && len(b.BBox.Max) >= 3 {
 			bodyBBox[b.Name] = [2][]float64{b.BBox.Min, b.BBox.Max}
 		}
+	}
+	bboxContains := func(outer, inner [2][]float64) bool {
+		tol := 0.25
+		for i := 0; i < 3; i++ {
+			if inner[0][i] < outer[0][i]-tol || inner[1][i] > outer[1][i]+tol {
+				return false
+			}
+		}
+		return true
 	}
 	bboxesTouch := func(a, b string) bool {
 		ba, oka := bodyBBox[a]
@@ -860,6 +872,53 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, snap []cadir.B
 			if !bboxesTouch(actualTarget, actualPB) {
 				continue
 			}
+			// Workaround for SolidCraft/SMLib failing `solid.combine` with
+			// "another entity is already related to the other one" when one body is
+			// a 100% coincident duplicate sub-solid already contained in the other.
+			// If the smaller body's bbox is contained in the larger body's bbox and
+			// the larger body's volume already matches Fusion's post-step target
+			// volume, remove the redundant duplicate directly instead of combining.
+			removeContainedDuplicate := func() bool {
+				bT, okT := bodyBBox[actualTarget]
+				bP, okP := bodyBBox[actualPB]
+				if !okT || !okP {
+					return false
+				}
+				larger, smaller := actualTarget, actualPB
+				lBox, sBox := bT, bP
+				if bodyVol[actualPB] > bodyVol[actualTarget] {
+					larger, smaller = actualPB, actualTarget
+					lBox, sBox = bP, bT
+				}
+				if !bboxContains(lBox, sBox) {
+					return false
+				}
+				delName := smaller
+				if larger != actualTarget {
+					tmpName := smaller + "_dup"
+					if _, rErr := c.client.Execute("body.rename", BodyRenameParams{Body: smaller, Name: tmpName}); rErr == nil {
+						delName = tmpName
+					}
+				}
+				if _, delErr := c.client.Execute("selection.delete", map[string]interface{}{
+					"items": []map[string]interface{}{{"type": "body", "name": delName}},
+				}); delErr != nil {
+					return false
+				}
+				if larger != actualTarget {
+					_, _ = c.client.Execute("body.rename", BodyRenameParams{Body: larger, Name: actualTarget})
+				}
+				return true
+			}
+			if expV, ok := postVol[t]; ok {
+				lVol := math.Max(bodyVol[actualTarget], bodyVol[actualPB])
+				sVol := math.Min(bodyVol[actualTarget], bodyVol[actualPB])
+				if sVol > 0 && math.Abs(lVol-expV) <= math.Max(1.0, 0.01*expV) && lVol+sVol > expV+0.5*sVol {
+					if removeContainedDuplicate() {
+						break
+					}
+				}
+			}
 			resp, cErr := c.client.Execute("solid.combine", SolidCombineParams{
 				Target:    actualTarget,
 				Tools:     []string{actualPB},
@@ -870,6 +929,9 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, snap []cadir.B
 				mergeIdx++
 				c.renameFeature(resp, fmt.Sprintf("Synthetic_Merge_%s_%d", e.Name, mergeIdx))
 				c.checkAndRenameBodies(resp, actualTarget)
+				break
+			}
+			if strings.Contains(cErr.Error(), "another entity is already related") && removeContainedDuplicate() {
 				break
 			}
 		}
