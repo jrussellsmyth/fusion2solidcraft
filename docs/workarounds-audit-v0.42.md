@@ -57,7 +57,7 @@
   * **v0.42.0-nightly:** *"solidcore: SolidCraft's planar region booleans run on solidcore-ops, made to match first (RFC 0003 step 2.10)"* (PR #15475); *"Sketch profiles: two rounded caps over one line both close a profile"* (PR #16566).
   * **v0.42.0:** *"Sketch profiles: two arcs meeting tangentially at one corner keep that corner, so a Join of the region builds"* (PR #16607).
   * **v0.41.0:** *"A sketch outline whose arcs leave a line tangentially closes into a profile again (#15560)"*; *"Extrude: adjacent profiles that touch at a tangent merge without a slit (#14106)"*; *"Profiles: a circle drawn twice is one hole of the ring around it (#13002)"*.
-  * *Caveat:* **v0.40.0-rc.4** noted *"a 40 mm hole that touches a plate's edge at one point splits the plate into 2 bodies"*, so `SeparateIsolatedTangentCircles` should be re-tested before removal.
+  * *Verification note:* Confirmed on SolidCraft 0.42.0 via `TestLiveModelIRSteps0To2` (with `SeparateIsolatedTangentCircles`: Step 1 `0.0000%` diff, Step 2 `0.0110%` diff; without it: Step 2 `Extrude2` `profile 0` fails).
 
 ### 1.4 Multi-Profile Batch Bisection & `pending` Polling
 * **Current implementation:**
