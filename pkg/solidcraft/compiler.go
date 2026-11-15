@@ -872,62 +872,6 @@ func (c *Compiler) mergeParticipantBodies(e cadir.ExtrudeFeature, snap []cadir.B
 				c.checkAndRenameBodies(resp, actualTarget)
 				break
 			}
-
-			// SMLib boolean join failed (e.g. status 1001 coincident topology).
-			// Check if this is a coincident body absorption where one body already
-			// contains the full expected post-step volume of the target.
-			expectedVol := postVol[t]
-			if expectedVol > 0 {
-				actualBodies, _ := c.inspectBodies()
-				var vPB, vTarget float64
-				pbFound, targetFound := false, false
-				for _, ab := range actualBodies {
-					if ab.Name == actualPB {
-						vPB = ab.VolumeMM3
-						pbFound = true
-					}
-					if ab.Name == actualTarget {
-						vTarget = ab.VolumeMM3
-						targetFound = true
-					}
-				}
-				if pbFound && targetFound {
-					relDiffPB := math.Abs(vPB-expectedVol) / expectedVol
-					relDiffTarget := math.Abs(vTarget-expectedVol) / expectedVol
-
-					if relDiffPB <= 0.02 && vTarget < 0.8*expectedVol {
-						tempAbsorbed := fmt.Sprintf("%s_absorbed_%d", actualTarget, c.curStep)
-						_ = c.renameBody(actualTarget, tempAbsorbed)
-						_ = c.renameBody(actualPB, actualTarget)
-						_, _ = c.client.Execute("solid.remove", map[string]interface{}{
-							"bodies": []string{tempAbsorbed},
-						})
-						for k, v := range c.bodyMap {
-							if v == actualPB || v == tempAbsorbed {
-								c.bodyMap[k] = actualTarget
-							}
-						}
-						c.bodyMap[actualPB] = actualTarget
-						c.bodyMap[pb] = actualTarget
-						c.bodyMap[t] = actualTarget
-						break
-					}
-
-					if relDiffTarget <= 0.02 && vPB < 0.8*expectedVol {
-						_, _ = c.client.Execute("solid.remove", map[string]interface{}{
-							"bodies": []string{actualPB},
-						})
-						for k, v := range c.bodyMap {
-							if v == actualPB {
-								c.bodyMap[k] = actualTarget
-							}
-						}
-						c.bodyMap[actualPB] = actualTarget
-						c.bodyMap[pb] = actualTarget
-						break
-					}
-				}
-			}
 		}
 	}
 }
@@ -1514,77 +1458,6 @@ func (c *Compiler) compileAndExecuteExtrude(e cadir.ExtrudeFeature, snap []cadir
 		return nil
 	}
 
-	// Raised-tool retry for cuts: when a cutting tool's start face is coplanar
-	// with a curved target surface, SolidCraft's boolean needs an unsupported
-	// touching-faces fallback. Raise the tool's start plane above the surface
-	// and extend the depth by the same amount — the tool volume outside the
-	// target contributes nothing, so the cut result is geometrically identical.
-	if e.Operation == "cut" {
-		for _, raise := range [...]float64{1, 5} {
-			raised := extParams
-			raised.StartOffset = extParams.StartOffset + raise
-			raised.Distance = extParams.Distance - raise
-			rResp, rErr := c.client.Execute("solid.extrude", raised)
-			if rErr == nil {
-				c.renameFeature(rResp, e.Name)
-				c.checkAndRenameBodies(rResp, desiredBodyName)
-				c.mergeParticipantBodies(e, snap, desiredBodyName)
-				return nil
-			}
-			fmt.Printf("Notice: raised-tool cut %s (+%gmm) failed: %v\n", e.Name, raise, rErr)
-		}
-	}
-
-	// Fallback for joins when the direct join extrude was rejected: extrude a
-	// new body, then combine it into the targets. Current SolidCraft versions
-	// support extrude-with-join directly, so this path only runs for kernels
-	// that cannot.
-	if e.Operation == "join" && len(targetIndices) > 1 {
-		newParams := SolidExtrudeParams{
-			Name:        e.Name,
-			Distance:    e.DistanceMM,
-			StartOffset: e.StartOffsetMM,
-			Operation:   "new",
-			Profiles:    profArg,
-		}
-		if sketchRef != nil {
-			newParams.Sketch = sketchRef
-		}
-		newResp, newErr := c.client.Execute("solid.extrude", newParams)
-		if newErr == nil {
-			c.renameFeature(newResp, e.Name)
-			var res struct {
-				CreatedBodies []string `json:"created_bodies"`
-			}
-			if json.Unmarshal([]byte(newResp), &res) == nil && len(res.CreatedBodies) > 0 {
-				combIdx := 0
-				for _, created := range res.CreatedBodies {
-					combined := false
-					for _, target := range targetBodies {
-						cResp, cErr := c.client.Execute("solid.combine", SolidCombineParams{
-							Target:    target,
-							Tools:     []string{created},
-							Operation: "join",
-							KeepTools: false,
-						})
-						if cErr == nil {
-							combIdx++
-							c.renameFeature(cResp, fmt.Sprintf("Synthetic_Join_%s_%d", e.Name, combIdx))
-							combined = true
-							c.checkAndRenameBodies(cResp, target)
-							break
-						}
-					}
-					if !combined && desiredBodyName != "" {
-						_ = c.renameBody(created, desiredBodyName)
-					}
-				}
-				c.mergeParticipantBodies(e, snap, desiredBodyName)
-				return nil
-			}
-		}
-	}
-
 	// Smart fallback: if cutting or joining multi-profile failed, recursively bisect
 	// to cut all valid profiles in minimal batches while isolating kernel-failing profiles.
 	if len(targetIndices) > 1 {
@@ -1925,48 +1798,6 @@ func (c *Compiler) compileAndExecuteCombine(cb cadir.CombineFeature) error {
 		c.renameFeature(resp, cb.Name)
 		c.checkAndRenameBodies(resp, desiredResultName)
 		return nil
-	}
-
-	// Resilient fallback: combine tool bodies sequentially pair-by-pair in passes
-	if len(tools) > 1 {
-		var lastErr error
-		totalSucceeded := 0
-		remainingTools := append([]string(nil), tools...)
-		for pass := 0; pass < 3 && len(remainingTools) > 0; pass++ {
-			var stillRemaining []string
-			passSucceeded := 0
-			for _, tool := range remainingTools {
-				subResp, pErr := c.client.Execute("solid.combine", SolidCombineParams{
-					Target:    target,
-					Tools:     []string{tool},
-					Operation: op,
-					KeepTools: cb.KeepTools,
-				})
-				if pErr != nil {
-					stillRemaining = append(stillRemaining, tool)
-					lastErr = pErr
-				} else {
-					passSucceeded++
-					totalSucceeded++
-					if totalSucceeded == 1 {
-						c.renameFeature(subResp, cb.Name)
-					} else {
-						c.renameFeature(subResp, fmt.Sprintf("Synthetic_%s_Part_%d", cb.Name, totalSucceeded))
-					}
-					c.checkAndRenameBodies(subResp, desiredResultName)
-				}
-			}
-			remainingTools = stillRemaining
-			if passSucceeded == 0 {
-				break
-			}
-		}
-		if len(remainingTools) < len(tools) {
-			return nil
-		}
-		if lastErr != nil {
-			return lastErr
-		}
 	}
 
 	return err
@@ -2418,79 +2249,6 @@ func (c *Compiler) compileMultiBodyExtrude(e cadir.ExtrudeFeature, profs []int, 
 			if n1+n2 > 0 {
 				targetsHandled++
 				continue
-			}
-		}
-
-		// Recovery ladder for a failed join/cut extrude against this
-		// target. SolidCraft's boolean rejects tools that only touch
-		// curved target faces; a raising of the tool's start plane makes
-		// it strictly intersect (geometry preserved: tool volume outside
-		// the target is inert, and raised cut depth compensates exactly).
-		allTargets := append([]string{t}, side[t]...)
-		done := false
-		if e.Operation == "cut" {
-			for _, raise := range [...]float64{1, 5} {
-				raised := params
-				raised.StartOffset = params.StartOffset + raise
-				raised.Distance = params.Distance - raise
-				rResp, rErr := c.client.Execute("solid.extrude", raised)
-				if rErr == nil {
-					c.renameFeature(rResp, name)
-					c.checkAndRenameBodies(rResp, t)
-					done = true
-					targetsHandled++
-					break
-				}
-				fmt.Printf("Notice: raised cut %s (%s, +%gmm) failed: %v\n", name, t, raise, rErr)
-			}
-		}
-		if done {
-			continue
-		}
-		for i, bt := range allTargets {
-			fbName := fmt.Sprintf("Synthetic_Join_%s_%d", e.Name, i+1)
-			raises := []float64{0}
-			if e.Operation == "cut" {
-				raises = []float64{1, 5}
-			}
-			var combineErr error
-			for _, raise := range raises {
-				newParams := SolidExtrudeParams{
-					Name:        fbName,
-					Distance:    e.DistanceMM - raise,
-					StartOffset: e.StartOffsetMM + raise,
-					Operation:   "new",
-					Profiles:    ps,
-					Sketch:      sketchRef,
-				}
-				newResp, newErr := c.client.Execute("solid.extrude", newParams)
-				if newErr == nil {
-					c.renameFeature(newResp, fbName)
-					var res struct {
-						CreatedBodies []string `json:"created_bodies"`
-					}
-					if json.Unmarshal([]byte(newResp), &res) == nil && len(res.CreatedBodies) > 0 {
-						cResp, cErr := c.client.Execute("solid.combine", SolidCombineParams{
-							Target:    bt,
-							Tools:     []string{res.CreatedBodies[0]},
-							Operation: string(e.Operation),
-							KeepTools: false,
-						})
-						if cErr == nil {
-							c.renameFeature(cResp, fbName+"_merge")
-							c.checkAndRenameBodies(cResp, bt)
-							combineErr = nil
-							targetsHandled++
-							break
-						}
-						combineErr = cErr
-					}
-				} else {
-					combineErr = newErr
-				}
-			}
-			if combineErr != nil {
-				fmt.Printf("Notice: synthetic combine %s into %s failed: %v\n", fbName, bt, combineErr)
 			}
 		}
 	}

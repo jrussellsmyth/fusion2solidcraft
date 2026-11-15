@@ -9,8 +9,8 @@
 
 | Workaround | Location | Status Assessment | Key Evidence |
 | :--- | :--- | :--- | :--- |
-| Raised-tool cut retry (`StartOffset + {1, 5}`) & new-body + combine fallback | `pkg/solidcraft/compiler.go` (`compileAndExecuteExtrude`, `compileMultiBodyExtrude`) | **Likely removable / less needed** | Extensive touching/coincident/curved-face boolean fixes in v0.40.1–v0.42.0-nightly |
-| Coincident topology `status 1001` absorption & multi-pass combine fallback | `pkg/solidcraft/compiler.go` (`mergeParticipantBodies`, `compileAndExecuteCombine`) | **Likely removable / less needed** | `relate: upstream status 1001`, self-touching & strip tolerance fixes in v0.42.0 |
+| Raised-tool cut retry (`StartOffset + {1, 5}`) & new-body + combine fallback | `pkg/solidcraft/compiler.go` (`compileAndExecuteExtrude`, `compileMultiBodyExtrude`) | **Removed** | Verified on SolidCraft 0.42.0: 0 triggers across all 96 steps of `model_ir.json` (all 96 checkpoints PASS) and `TestLiveBooleanWorkarounds/TouchingCurvedFaceCut_NoRaise` passed |
+| Coincident topology `status 1001` absorption & multi-pass combine fallback | `pkg/solidcraft/compiler.go` (`mergeParticipantBodies`, `compileAndExecuteCombine`) | **Removed** | Verified on SolidCraft 0.42.0: 0 triggers across all 96 steps of `model_ir.json`; `TestLiveBooleanWorkarounds/CoincidentEdgeTouchJoin` and `MultiToolCombine` passed |
 | Fillet `< 15 mm` short B-spline span filtering & `TangentChain: false` | `pkg/solidcraft/compiler.go` (`compileAndExecuteFillet`) | **Likely removable / less needed** | Retired `fillet_trace_rejects_short_step` (v0.42.0), 2° tangent chain alignment (v0.41.0), freeform/spline fillet fixes |
 | Sketch pre-conditioning (`SeparateIsolatedTangentCircles`, `SplitArcsAtCircles`, `BridgeOpenCollinearGaps`) | `pkg/cadir/precondition.go`, `pkg/solidcraft/compiler.go` | **Partially removed (1 of 3)** | Verified on SolidCraft 0.42.0: `SplitArcsAtCircles` removed (`connectors` identical); `SeparateIsolatedTangentCircles` still required (Step 2 `Extrude2` profile 0 fails with `SMLib's result is not a closed solid` without it); `BridgeOpenCollinearGaps` still required (0.10 mm gap yields 0 profiles without it) |
 | Recursive multi-profile batch bisection (`executeBatchExtrude`) & `pending` polling | `pkg/solidcraft/compiler.go`, `pkg/solidcraft/client.go` | **Faster / less triggered** | 10× / linear-time multi-hole extrusions & cuts (v0.40.0–v0.42.0-nightly); `running` responds during `batch` |
@@ -22,11 +22,8 @@
 ## 1. Workarounds Likely No Longer Necessary or Changed
 
 ### 1.1 Raised-Tool Cut Retry & Coincident / Touching-Face Boolean Fallbacks
-* **Current implementation:**
-  * `compileAndExecuteExtrude` (`pkg/solidcraft/compiler.go`, lines 1520–1539) and `compileMultiBodyExtrude` (lines 2427–2449): retries failed `cut` extrudes with `StartOffset + raise` and `Distance - raise` for `raise ∈ {1, 5}` mm to avoid boolean failures on touching curved faces (see `BUG_REPORT.md`).
-  * `compileAndExecuteExtrude` (lines 1541–1589) and `compileMultiBodyExtrude` (lines 2453–2498): falls back to extruding with `operation: "new"` followed by `solid.combine` when direct `join` (or multi-body `cut`/`join`) fails.
-  * `mergeParticipantBodies` (lines 879–933): catches SMLib coincident-topology errors (e.g. `status 1001`) by checking if either body already holds the expected post-step volume and removing/renaming the redundant body.
-  * `compileAndExecuteCombine` (lines 1933–1973): falls back to sequential pair-by-pair `solid.combine` across up to 3 passes when multi-tool combine fails.
+* **Status after v0.42.0 audit (Removed):**
+  * All four fallback blocks were removed from `pkg/solidcraft/compiler.go` (`mergeParticipantBodies`, `compileAndExecuteExtrude`, `compileAndExecuteCombine`, and `compileMultiBodyExtrude`) after verifying `0` triggers across all 96 steps of `model_ir.json` (96/96 checkpoints PASS) and passing `TestLiveBooleanWorkarounds`.
 * **Changelog evidence:**
   * **v0.42.0:** *"Kernel booleans: intersecting or cutting parts whose round walls coincide only locally no longer fails"* (PR #15869).
   * **v0.42.0:** *"Booleans: two solids joined where they touch along a line no longer fail with 'relate: upstream status 1001'"* (PR #16473).
