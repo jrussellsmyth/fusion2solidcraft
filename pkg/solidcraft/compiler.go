@@ -466,8 +466,12 @@ func (c *Compiler) CompileModelWithOptions(model *cadir.Model, opts CompileOptio
 func (c *Compiler) compileAndExecuteSketch(s cadir.Sketch) error {
 	var cmds []Command
 
-	// Bridge open collinear micro-gaps between adjacent line segments.
-	curves := cadir.BridgeOpenCollinearGaps(s.Curves)
+	// Universal pre-conditioning:
+	// 1. Separate isolated tangent circles from boundary lines so SolidCraft
+	//    avoids non-manifold self-touching pinch points in SMLib.
+	curves := cadir.SeparateIsolatedTangentCircles(s.Curves)
+	// 2. Bridge open collinear micro-gaps between adjacent line segments.
+	curves = cadir.BridgeOpenCollinearGaps(curves)
 
 	// 1. sketch.create
 	plane := s.Plane

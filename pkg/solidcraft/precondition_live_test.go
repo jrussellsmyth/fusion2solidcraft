@@ -353,3 +353,34 @@ func TestLiveModelIRSketchesWithoutPreconditioning(t *testing.T) {
 		})
 	}
 }
+
+func TestLiveModelIRSteps0To2(t *testing.T) {
+	data, err := os.ReadFile("../../model_ir.json")
+	if err != nil {
+		t.Skip("model_ir.json not present; skipping Step 0-2 regression test")
+	}
+	var model cadir.Model
+	if err := json.Unmarshal(data, &model); err != nil {
+		t.Fatalf("unmarshal model_ir.json: %v", err)
+	}
+
+	client := startLiveClientOrSkip(t)
+	comp := NewCompiler(client)
+	results, err := comp.CompileModelWithOptions(&model, CompileOptions{
+		Verify:           true,
+		UntilStep:        2,
+		StepFrom:         -1,
+		StopOnDivergence: true,
+	})
+	if err != nil {
+		t.Fatalf("CompileModelWithOptions(UntilStep=2) failed: %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("expected at least 2 verified checkpoints for Steps 0-2, got %d", len(results))
+	}
+	for _, r := range results {
+		if !r.Passed {
+			t.Errorf("checkpoint %s failed: %s", r.StepName, r.Message)
+		}
+	}
+}
