@@ -83,6 +83,7 @@ type TimelineRenameParams struct {
 
 // SolidFilletParams parameters for solid.fillet.
 type SolidFilletParams struct {
+	Body         string      `json:"body,omitempty"`
 	Radius       float64     `json:"radius"`
 	Edges        [][]float64 `json:"edges"` // [[x, y, z] pointOnEdge]
 	TangentChain *bool       `json:"tangent_chain,omitempty"`
