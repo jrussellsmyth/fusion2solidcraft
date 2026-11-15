@@ -14,7 +14,7 @@
 | Fillet `< 15 mm` short B-spline span filtering & `TangentChain: false` | `pkg/solidcraft/compiler.go` (`compileAndExecuteFillet`) | **Removed** | Verified on SolidCraft 0.42.0: `TestLiveFilletWorkarounds` passes with unfiltered top edges on a degree-5 B-spline plate (both `TangentChain: false` and `true`); `TestLiveFillet5FromCheckpoint` shows identical behavior across all 4 A/B variants (`largest radius that fits is 2.087 mm`). Added per-body `Body` disambiguation to `SolidFilletParams` |
 | Sketch pre-conditioning (`SeparateIsolatedTangentCircles`, `SplitArcsAtCircles`, `BridgeOpenCollinearGaps`) | `pkg/cadir/precondition.go`, `pkg/solidcraft/compiler.go` | **Partially removed (1 of 3)** | Verified on SolidCraft 0.42.0: `SplitArcsAtCircles` removed (`connectors` identical); `SeparateIsolatedTangentCircles` still required (Step 2 `Extrude2` profile 0 fails with `SMLib's result is not a closed solid` without it); `BridgeOpenCollinearGaps` still required (0.10 mm gap yields 0 profiles without it) |
 | Recursive multi-profile batch bisection (`executeBatchExtrude`) & `pending` polling | `pkg/solidcraft/compiler.go`, `pkg/solidcraft/client.go` | **Faster / less triggered** | 10× / linear-time multi-hole extrusions & cuts (v0.40.0–v0.42.0-nightly); `running` responds during `batch` |
-| Coplanar subdivided face collection (`collectCoplanarFaces`) | `pkg/solidcraft/compiler.go` | **Possibly simplified — re-test** | Coplanar sheet merging (v0.42.0) and flat B-spline planar recognition |
+| Coplanar subdivided face collection (`collectCoplanarFaces`) | `pkg/solidcraft/compiler.go` | **Kept (verified)** | Verified on SolidCraft 0.42.0: `TestLiveCoplanarFaceExtrude` confirms single `Face` only extrudes one subdivided coplanar face (`+960 mm³`) vs `Faces` extruding both (`+1920 mm³`); `model_ir.json` Steps 52–53 each have `coplanarCount=1` |
 | Move rotate+translate split, body reconciliation, temporary-merge lookahead | `pkg/solidcraft/compiler.go`, `pkg/cadir/snapshot.go` | **Unchanged — keep** | No `solid.move` dual-transform changes; reconciliation/lookahead bridge Fusion vs. SolidCraft semantics |
 
 ---
@@ -70,8 +70,11 @@
   * **v0.40.0-nightly:** *"mcp: `running` answers at once while a long `batch` runs"* (#14007 / PR #14083).
 
 ### 1.5 Coplanar Subdivided Face Collection
-* **Current implementation:**
-  * `collectCoplanarFaces` (`pkg/solidcraft/compiler.go`, lines 612–695): queries `body_topology` to collect all coplanar subdivided faces within the target face's bbox for face extrusions.
+* **Status after v0.42.0 audit (Kept):**
+  * `collectCoplanarFaces` (`pkg/solidcraft/compiler.go`, lines 609–692): queries `body_topology` to collect all coplanar subdivided faces within the target face's bbox for face extrusions, and identifies which candidate body owns `FaceTarget`.
+  * **Empirical verification:**
+    * `TestLiveCoplanarFaceExtrude/SingleFace_vs_BothCoplanarFaces` (`pkg/solidcraft/coplanar_faces_live_test.go`) splits a 40×20×5 box's top face with a through-slot and confirms that on SolidCraft 0.42.0, `solid.extrude` with a single `Face` still only extrudes one side (`+960.00 mm³`), whereas `Faces` + `FaceBody` extrudes both coplanar faces (`+1920.00 mm³`).
+    * In `model_ir.json`, Steps 52 (`fifi_left`) and 53 (`space_right_mcu`) both report `coplanarCount=1`, so multi-face collection is not triggered on this model, though `collectCoplanarFaces` still locates the owning `faceBody`.
 * **Changelog evidence:**
   * **v0.42.0:** *"solidcore: merge a sheet's coplanar faces, with old-to-new edge and face maps"* (PR #16040).
   * **v0.40.0-nightly:** *"Planar faces: a flat B-spline face (a loft side through three or more sections) is planar"* (#14346 / PR #14394).
